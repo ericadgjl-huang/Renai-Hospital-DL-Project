@@ -1,0 +1,27 @@
+# --- 忽略 Python 快取與 Jupyter Notebook 暫存 ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# --- 忽略原始數據與處理過的數據 (保護個資與節省空間) ---
+drive-download-*/
+yolo_dataset_process/
+stage_cls_dataset/
+vis_all_roi_side/
+vis_test_pred/
+
+# --- 忽略模型權重檔 (檔案通常很大) ---
+weights/
+*.pt
+*.pth
+*.onnx
+
+# --- 忽略訓練輸出結果與 Checkpoints ---
+outputs_*/
+03.5_combination/
+combination_graphs/
+m*_gradcam_*/
+
+# --- 忽略作業系統縮圖 ---
+Thumbs.db
+Desktop.ini
