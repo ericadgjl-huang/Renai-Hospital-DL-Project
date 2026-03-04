@@ -13,7 +13,7 @@
 2.  **分層分類**：
     * **Model 1**：區分 `Stage 4 (重症)` vs `其他` (使用 **DenseNet121**)。
     * **Model 2**：區分 `Stage 1 (輕症)` vs `其他` (基於 **EfficientNet-B0, ResNet50, ConvNeXt-Tiny** 採用 Stacking 集成策略)。
-    * **Model 3**：區分 `Stage 2` vs `Stage 3` (使用 **EfficientNet-B0**)。
+    * **Model 3**：區分 `Stage 2` vs `Stage 3` (使用 **DenseNet121**)。
 3.  **邏輯整合**：
     * 綜合上述模型輸出最終分期結果。
 
