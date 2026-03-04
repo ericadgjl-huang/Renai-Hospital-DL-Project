@@ -11,9 +11,9 @@
 1.  **ROI 偵測 (YOLOv8)**：
     * 自動定位並裁切股骨頭區域。
 2.  **分層分類**：
-    * **Model 1**：區分 `Stage 4 (重症)` vs `其他`。
-    * **Model 2**：區分 `Stage 1 (輕症)` vs `其他` (採用 Stacking 集成策略)。
-    * **Model 3**：區分 `Stage 2` vs `Stage 3`。
+    * **Model 1**：區分 `Stage 4 (重症)` vs `其他` (使用 **DenseNet121**)。
+    * **Model 2**：區分 `Stage 1 (輕症)` vs `其他` (基於 **EfficientNet-B0, ResNet50, ConvNeXt-Tiny** 採用 Stacking 集成策略)。
+    * **Model 3**：區分 `Stage 2` vs `Stage 3` (使用 **EfficientNet-B0**)。
 3.  **邏輯整合**：
     * 綜合上述模型輸出最終分期結果。
 
@@ -35,7 +35,8 @@
 
 ## ⚙️ 環境與資料設定
 
-> ⚠️ **注意**：由於病患隱私與檔案大小限制，本倉庫 **不包含** 原始影像數據與訓練好的模型權重 (`.pt`, `.pth`)。
+> ⚠️ **注意**：由於病患隱私與檔案大小限制，本倉庫 **不包含** 原始影像數據。
+> 💾 **模型權重下載**：訓練好的模型權重檔 (`.pt`, `.pkl`) 已上傳至 **GitHub Releases**。請至 Repo 右側的 **Releases** 區塊下載所需的權重檔案，並放置於專案的工作目錄（或 `weights/` 資料夾）中。
 
 ### 🔧 環境安裝 (Installation)
 
