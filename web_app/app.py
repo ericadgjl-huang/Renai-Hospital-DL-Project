@@ -180,12 +180,20 @@ def init_models():
     gcam_m1 = GradCAM(m1_model, get_target_layer(m1_model, "densenet121"))
 
     # --- M2 (Stacking Meta Classifier for inference) ---
-    m2_model = M2StackingInference(
-        models_dir=PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model",
-        meta_ckpt_path=PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model" / "best_meta_classifier.pkl",
-        device=device
-    )
+    cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
+    meta_clf = joblib.load(cfg["meta_clf_path"])
+    thr2_val = float(cfg.get("thr2_default", 0.5))
     
+    m2_base_models = []
+    for item in cfg["m2_base_models"]:
+        name = item["model_name"]
+        ckpt = Path(item["ckpt_in_comb_dir"])
+        m = create_model(name, num_classes=2).to(device)
+        m.load_state_dict(torch.load(ckpt, map_location=device))
+        m.eval()
+        m2_base_models.append(m)
+        
+    m2_model = M2Stacker(m2_base_models, meta_clf, device=device)
     # --- M2 (Standalone EfficientNet-B0 for Grad-CAM) ---
     # The user specifically requested this model for M2 heatmaps
     m2_gcam_ckpt = PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model" / "best_efficientnet_b0.pth"
@@ -202,8 +210,7 @@ def init_models():
     gcam_m3 = GradCAM(m3_model, get_target_layer(m3_model, "densenet121"))
     
     # Load config for thr2_val
-    cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
-    thr2_val = float(cfg.get("thr2_default", 0.5))
+    # (Removed duplicate load since it's now handled smoothly in M2 setup)
     
     val_tf = T.Compose([
         T.Resize((384, 384)),
