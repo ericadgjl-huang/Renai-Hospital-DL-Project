@@ -29,6 +29,7 @@
 | `03.25_stage_classifier_m2_stacking.ipynb` | 針對 M2 模型進行 Stacking 集成學習訓練。 |
 | `03.5_stage_classifier_combinationV9.ipynb` | 整合所有模型進行最終推論與評估。 |
 | `04_feature_spaceV2.ipynb` | 繪製 t-SNE 圖以分析特徵空間分布。 |
+| `web_app/` | **[NEW]** 視覺化圖形操作網頁。提供上傳影像自動 YOLO 裁切、Grad-CAM 熱力圖及最終分類機率呈現之 Flask 應用。 |
 | `.gitignore` | 設定 Git 忽略檔案清單（權重、數據集、暫存檔）。 |
 
 ---
