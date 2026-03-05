@@ -243,8 +243,12 @@ def predict():
         annotated_img.save(buffered_anno, format="JPEG")
         annotated_base64 = base64.b64encode(buffered_anno.getvalue()).decode("utf-8")
         
-        # 2. Hierarchical Classification
-        img_tensor = val_tf(cropped_img).unsqueeze(0).to(device)
+        # 2. Hierarchical Classification (Unify orientation to 'L')
+        inference_img = cropped_img
+        if side == "R":
+            inference_img = cropped_img.transpose(Image.FLIP_LEFT_RIGHT)
+            
+        img_tensor = val_tf(inference_img).unsqueeze(0).to(device)
         
         # For overall 4-stage probabilities
         
@@ -257,7 +261,11 @@ def predict():
         pred_idx = m1_logits.argmax(1).item()
         gcam_map = gcam_m1(img_tensor_gcam, class_idx=pred_idx)
         
-        # Generate Overlay Image
+        # Flip the heatmap back if we flipped the image for inference
+        if side == "R":
+            gcam_map = np.fliplr(gcam_map)
+        
+        # Generate Overlay Image (using the original un-flipped cropped_img for display)
         img_np = np.array(cropped_img.resize((384, 384))) / 255.0
         h, w, _ = img_np.shape
         gcam_resized = cv2.resize(gcam_map, (w, h))
