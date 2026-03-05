@@ -145,44 +145,65 @@ class GradCAM:
         return gcam.detach().cpu().numpy()
 
 def get_target_layer(model, model_name: str):
+    model_name = model_name.lower()
+    if model_name in ["densenet121", "densenet169"]:
+        return model.features
+    elif model_name in ["efficientnet_b0", "efficientnet_b1"]:
+        return model.features[-1]
     return model.features
 
+# Globals for models
 yolo_model = None
 m1_model = None
 m2_model = None
 m3_model = None
 val_tf = None
 thr2_val = 0.5 
+
+# Globals for Grad-CAM
 gcam_m1 = None
+m2_gcam_model = None # Standalone EfficientNet-B0 since M2 is stacked
+gcam_m2 = None
+gcam_m3 = None
 
 def init_models():
-    global yolo_model, m1_model, m2_model, m3_model, val_tf, thr2_val, gcam_m1
+    global yolo_model, m1_model, m2_model, m3_model, val_tf, thr2_val
+    global gcam_m1, m2_gcam_model, gcam_m2, gcam_m3
+    
     print("Loading Models...", flush=True)
     yolo_model = YOLO(str(YOLO_WEIGHTS))
     
+    # --- M1 (DenseNet121) ---
     m1_model = create_model("densenet121", num_classes=2).to(device)
     m1_model.load_state_dict(torch.load(M1_CKPT, map_location=device))
     m1_model.eval()
     gcam_m1 = GradCAM(m1_model, get_target_layer(m1_model, "densenet121"))
 
+    # --- M2 (Stacking Meta Classifier for inference) ---
+    m2_model = M2StackingInference(
+        models_dir=PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model",
+        meta_ckpt_path=PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model" / "best_meta_classifier.pkl",
+        device=device
+    )
+    
+    # --- M2 (Standalone EfficientNet-B0 for Grad-CAM) ---
+    # The user specifically requested this model for M2 heatmaps
+    m2_gcam_ckpt = PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model" / "best_efficientnet_b0.pth"
+    m2_gcam_model = create_model("efficientnet_b0", num_classes=2).to(device)
+    if m2_gcam_ckpt.exists():
+        m2_gcam_model.load_state_dict(torch.load(m2_gcam_ckpt, map_location=device))
+    m2_gcam_model.eval()
+    gcam_m2 = GradCAM(m2_gcam_model, get_target_layer(m2_gcam_model, "efficientnet_b0"))
+
+    # --- M3 (DenseNet121) ---
     m3_model = create_model("densenet121", num_classes=2).to(device)
     m3_model.load_state_dict(torch.load(M3_CKPT, map_location=device))
     m3_model.eval()
-
-    cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
-    meta_clf = joblib.load(cfg["meta_clf_path"])
-    thr2_val = float(cfg.get("thr2_default", 0.5))
+    gcam_m3 = GradCAM(m3_model, get_target_layer(m3_model, "densenet121"))
     
-    m2_base_models = []
-    for item in cfg["m2_base_models"]:
-        name = item["model_name"]
-        ckpt = Path(item["ckpt_in_comb_dir"])
-        m = create_model(name, num_classes=2).to(device)
-        m.load_state_dict(torch.load(ckpt, map_location=device))
-        m.eval()
-        m2_base_models.append(m)
-        
-    m2_model = M2Stacker(m2_base_models, meta_clf, device=device)
+    # Load config for thr2_val
+    cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
+    thr2_val = float(cfg.get("thr2_default", 0.5))
     
     val_tf = T.Compose([
         T.Resize((384, 384)),
@@ -199,6 +220,23 @@ except Exception as e:
 @app.route("/")
 def index():
     return render_template("index.html")
+
+def generate_overlay_base64(gcam_map, original_img, side):
+    """Helper function to cleanly generate the overlay base64 string"""
+    if side == "R":
+        gcam_map = np.fliplr(gcam_map)
+    
+    img_np = np.array(original_img.resize((384, 384))) / 255.0
+    h, w, _ = img_np.shape
+    gcam_resized = cv2.resize(gcam_map, (w, h))
+    heatmap = cv2.applyColorMap(np.uint8(255 * gcam_resized), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB) / 255.0
+    overlay = np.clip(0.4 * heatmap + 0.6 * img_np, 0, 1)
+    
+    overlay_img = Image.fromarray((overlay * 255).astype(np.uint8))
+    buffered = io.BytesIO()
+    overlay_img.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -243,47 +281,46 @@ def predict():
         annotated_img.save(buffered_anno, format="JPEG")
         annotated_base64 = base64.b64encode(buffered_anno.getvalue()).decode("utf-8")
         
+        # ---------------------------------------------------------
         # 2. Hierarchical Classification (Unify orientation to 'L')
+        # ---------------------------------------------------------
         inference_img = cropped_img
         if side == "R":
             inference_img = cropped_img.transpose(Image.FLIP_LEFT_RIGHT)
             
         img_tensor = val_tf(inference_img).unsqueeze(0).to(device)
         
-        # For overall 4-stage probabilities
-        
-        # Node-1: 123 vs 4 (Stage 4 check)
+        # --- Node-1: 123 vs 4 (Stage 4 check) ---
         m1_logits = m1_model(img_tensor)
         p_stage4 = F.softmax(m1_logits, dim=1)[0, 1].item()
         
-        # Calculate Grad-CAM on m1 model (we must use a tensor with requires_grad=True)
-        img_tensor_gcam = img_tensor.clone().requires_grad_(True)
-        pred_idx = m1_logits.argmax(1).item()
-        gcam_map = gcam_m1(img_tensor_gcam, class_idx=pred_idx)
+        img_tensor_gcam_m1 = img_tensor.clone().requires_grad_(True)
+        pred_idx_m1 = m1_logits.argmax(1).item()
+        gcam_map_m1 = gcam_m1(img_tensor_gcam_m1, class_idx=pred_idx_m1)
+        overlay_m1 = generate_overlay_base64(gcam_map_m1, cropped_img, side)
         
-        # Flip the heatmap back if we flipped the image for inference
-        if side == "R":
-            gcam_map = np.fliplr(gcam_map)
-        
-        # Generate Overlay Image (using the original un-flipped cropped_img for display)
-        img_np = np.array(cropped_img.resize((384, 384))) / 255.0
-        h, w, _ = img_np.shape
-        gcam_resized = cv2.resize(gcam_map, (w, h))
-        heatmap = cv2.applyColorMap(np.uint8(255 * gcam_resized), cv2.COLORMAP_JET)
-        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB) / 255.0
-        overlay = np.clip(0.4 * heatmap + 0.6 * img_np, 0, 1)
-        
-        overlay_img = Image.fromarray((overlay * 255).astype(np.uint8))
-        buffered_overlay = io.BytesIO()
-        overlay_img.save(buffered_overlay, format="JPEG")
-        overlay_base64 = base64.b64encode(buffered_overlay.getvalue()).decode("utf-8")
-        
-        # Node-2: 1 vs 23 (Stage 1 check)
+        # --- Node-2: 1 vs 23 (Stage 1 check) ---
         p_stage1_nodal = m2_model.p_stage1(img_tensor).item()
         
-        # Node-3: 2 vs 3
-        with torch.no_grad():
-            p_stage3_nodal = F.softmax(m3_model(img_tensor), dim=1)[0, 1].item()
+        # GCAM for M2 (using standalone efficientnet_b0)
+        m2_logits = m2_gcam_model(img_tensor)
+        img_tensor_gcam_m2 = img_tensor.clone().requires_grad_(True)
+        pred_idx_m2 = m2_logits.argmax(1).item()
+        gcam_map_m2 = gcam_m2(img_tensor_gcam_m2, class_idx=pred_idx_m2)
+        overlay_m2 = generate_overlay_base64(gcam_map_m2, cropped_img, side)
+        
+        # --- Node-3: 2 vs 3 ---
+        m3_logits = m3_model(img_tensor)
+        p_stage3_nodal = F.softmax(m3_logits, dim=1)[0, 1].item()
+        
+        img_tensor_gcam_m3 = img_tensor.clone().requires_grad_(True)
+        pred_idx_m3 = m3_logits.argmax(1).item()
+        gcam_map_m3 = gcam_m3(img_tensor_gcam_m3, class_idx=pred_idx_m3)
+        overlay_m3 = generate_overlay_base64(gcam_map_m3, cropped_img, side)
+        
+        # ---------------------------------------------------------
+        # 3. Final Logic and Probabilities
+        # ---------------------------------------------------------
             
         final_stage = None
         if p_stage4 >= 0.5:
@@ -315,7 +352,9 @@ def predict():
         return jsonify({
             "annotated_image": f"data:image/jpeg;base64,{annotated_base64}",
             "cropped_image": f"data:image/jpeg;base64,{cropped_base64}",
-            "gradcam_image": f"data:image/jpeg;base64,{overlay_base64}",
+            "gradcam_m1": f"data:image/jpeg;base64,{overlay_m1}",
+            "gradcam_m2": f"data:image/jpeg;base64,{overlay_m2}",
+            "gradcam_m3": f"data:image/jpeg;base64,{overlay_m3}",
             "stage": final_stage,
             "sorted_probs": probs
         })
