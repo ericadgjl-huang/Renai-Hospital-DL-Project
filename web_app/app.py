@@ -1,4 +1,6 @@
 import os
+import tempfile
+import uuid
 import io
 import base64
 import json
@@ -254,8 +256,8 @@ def predict():
     file = request.files["image"]
     img = Image.open(file.stream).convert('RGB')
     
-    # Save a temp image for YOLO 
-    img_path = WEB_APP_DIR / "temp.jpg"
+    # Save a temp image for YOLO (use system temp dir for Vercel Serverless environment)
+    img_path = Path(tempfile.gettempdir()) / f"temp_{uuid.uuid4().hex}.jpg"
     img.save(img_path)
     
     try:
