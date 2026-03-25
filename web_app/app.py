@@ -312,7 +312,7 @@ def predict():
         # GCAM for M2 (using standalone efficientnet_b0)
         m2_logits = m2_gcam_model(img_tensor)
         img_tensor_gcam_m2 = img_tensor.clone().requires_grad_(True)
-        pred_idx_m2 = m2_logits.argmax(1).item()
+        pred_idx_m2 = 0 if p_stage1_nodal >= thr2_val else 1
         gcam_map_m2 = gcam_m2(img_tensor_gcam_m2, class_idx=pred_idx_m2)
         overlay_m2 = generate_overlay_base64(gcam_map_m2, cropped_img, side)
         
