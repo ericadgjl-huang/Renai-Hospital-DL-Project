@@ -128,7 +128,7 @@ class GradCAM:
         
         # We need gradients to flow here
         score = out[0, class_idx]
-        score.backward(retain_graph=True)
+        score.backward()
         
         acts = self.activations
         grads = self.gradients
