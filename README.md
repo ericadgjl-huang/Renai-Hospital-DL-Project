@@ -1,7 +1,7 @@
-# 🏥 仁愛醫院 - 骨壞死 (ONFH) 分期深度學習專案
+# 🏥 仁愛醫院 - 髖關節 X 光影像Ficat 分級深度學習系統
 
 ## 📖 專案簡介
-本專案旨在利用深度學習技術，針對**骨壞死（Osteonecrosis of the Femoral Head, ONFH）**的 X 光影像進行自動化分期（Ficat Classification Stage 1~4）。
+本專案旨在利用深度學習技術，針對髖關節的 X 光影像進行自動化分級（Ficat Classification Stage 1~4）。
 
 ---
 
