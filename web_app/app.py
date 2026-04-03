@@ -2,6 +2,8 @@ import os
 import io
 import base64
 import json
+import shutil
+import urllib.request
 import joblib
 import cv2
 import numpy as np
@@ -17,12 +19,75 @@ from ultralytics import YOLO
 
 WEB_APP_DIR = Path(__file__).resolve().parent
 PROJ_ROOT = WEB_APP_DIR.parent
+LOCAL_MODEL_ROOT = PROJ_ROOT
+DEPLOY_MODEL_ROOT = WEB_APP_DIR / "_model_cache"
 
-YOLO_WEIGHTS = PROJ_ROOT / "yolo_dataset_process" / "runs" / "detect" / "train_nb" / "weights" / "best.pt"
+MODEL_FILES = {
+    "YOLO_WEIGHTS": Path("yolo_dataset_process") / "runs" / "detect" / "train_nb" / "weights" / "best.pt",
+    "M1_CKPT": Path("outputs_bin(1,2,3),(4)") / "_best_model" / "best_densenet121.pth",
+    "M3_CKPT": Path("outputs_bin(2),(3)") / "_best_model" / "best_densenet121.pth",
+    "CFG_PATH": Path("03.5_combination") / "03.25_m2_stacking_top3" / "config.json",
+    "M2_GCAM_CKPT": Path("outputs_bin(1),(2,3,4)") / "_best_model" / "best_efficientnet_b0.pth",
+    "M2_BASE_EFFICIENTNET": Path("03.5_combination") / "03.25_m2_stacking_top3" / "m2_base_ckpts" / "efficientnet_b0__best_efficientnet_b0.pth",
+    "M2_BASE_RESNET50": Path("03.5_combination") / "03.25_m2_stacking_top3" / "m2_base_ckpts" / "resnet50__best_resnet50.pth",
+    "M2_BASE_CONVNEXT": Path("03.5_combination") / "03.25_m2_stacking_top3" / "m2_base_ckpts" / "convnext_tiny__best_convnext_tiny.pth",
+    "M2_META": Path("03.5_combination") / "03.25_m2_stacking_top3" / "meta" / "m2_meta_logreg.pkl",
+}
 
-M1_CKPT = PROJ_ROOT / "outputs_bin(1,2,3),(4)" / "_best_model" / "best_densenet121.pth"
-M3_CKPT = PROJ_ROOT / "outputs_bin(2),(3)" / "_best_model" / "best_densenet121.pth"
-CFG_PATH = PROJ_ROOT / "03.5_combination" / "03.25_m2_stacking_top3" / "config.json"
+
+def running_on_render() -> bool:
+    return bool(os.environ.get("RENDER"))
+
+
+def get_model_root() -> Path:
+    override = os.environ.get("MODEL_ROOT")
+    if override:
+        return Path(override)
+    if os.environ.get("MODEL_ASSET_BASE_URL"):
+        return DEPLOY_MODEL_ROOT
+    return LOCAL_MODEL_ROOT
+
+
+def ensure_parent(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def download_model_assets(model_root: Path):
+    base_url = os.environ.get("MODEL_ASSET_BASE_URL", "").rstrip("/")
+    if not base_url:
+        return
+
+    print("MODEL_ASSET_BASE_URL detected, ensuring model files are downloaded...", flush=True)
+    for rel_path in MODEL_FILES.values():
+        target = model_root / rel_path
+        if target.exists():
+            continue
+        ensure_parent(target)
+        source_url = f"{base_url}/{rel_path.name}"
+        print(f"Downloading {source_url} -> {target}", flush=True)
+        with urllib.request.urlopen(source_url) as response, target.open("wb") as output_file:
+            shutil.copyfileobj(response, output_file)
+
+
+def resolve_model_path(model_root: Path, key: str) -> Path:
+    rel_path = MODEL_FILES[key]
+    primary = model_root / rel_path
+    if primary.exists():
+        return primary
+
+    fallback = LOCAL_MODEL_ROOT / rel_path
+    if fallback.exists():
+        return fallback
+
+    raise FileNotFoundError(f"Missing required model file: {rel_path}")
+
+
+MODEL_ROOT = get_model_root()
+
+YOLO_WEIGHTS = resolve_model_path(MODEL_ROOT, "YOLO_WEIGHTS") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["YOLO_WEIGHTS"]
+M1_CKPT = resolve_model_path(MODEL_ROOT, "M1_CKPT") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["M1_CKPT"]
+M3_CKPT = resolve_model_path(MODEL_ROOT, "M3_CKPT") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["M3_CKPT"]
+CFG_PATH = resolve_model_path(MODEL_ROOT, "CFG_PATH") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["CFG_PATH"]
 
 app = Flask(__name__)
 device = "cpu"  # 強制使用 CPU 避免 CUDA kernel image mismatch 錯誤
@@ -166,21 +231,58 @@ m2_gcam_model = None # Standalone EfficientNet-B0 since M2 is stacked
 gcam_m2 = None
 gcam_m3 = None
 
+def load_runtime_config(model_root: Path):
+    cfg_path = resolve_model_path(model_root, "CFG_PATH")
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+
+    meta_path = model_root / MODEL_FILES["M2_META"]
+    if not meta_path.exists():
+        meta_path = LOCAL_MODEL_ROOT / MODEL_FILES["M2_META"]
+    cfg["meta_clf_path"] = str(meta_path)
+
+    base_ckpt_overrides = {
+        "efficientnet_b0": model_root / MODEL_FILES["M2_BASE_EFFICIENTNET"],
+        "resnet50": model_root / MODEL_FILES["M2_BASE_RESNET50"],
+        "convnext_tiny": model_root / MODEL_FILES["M2_BASE_CONVNEXT"],
+    }
+
+    for item in cfg["m2_base_models"]:
+        model_name = item["model_name"]
+        runtime_path = base_ckpt_overrides[model_name]
+        if not runtime_path.exists():
+            runtime_path = LOCAL_MODEL_ROOT / MODEL_FILES[
+                {
+                    "efficientnet_b0": "M2_BASE_EFFICIENTNET",
+                    "resnet50": "M2_BASE_RESNET50",
+                    "convnext_tiny": "M2_BASE_CONVNEXT",
+                }[model_name]
+            ]
+        item["ckpt_in_comb_dir"] = str(runtime_path)
+
+    return cfg
+
+
 def init_models():
     global yolo_model, m1_model, m2_model, m3_model, val_tf, thr2_val
     global gcam_m1, m2_gcam_model, gcam_m2, gcam_m3
     
     print("Loading Models...", flush=True)
-    yolo_model = YOLO(str(YOLO_WEIGHTS))
+    download_model_assets(MODEL_ROOT)
+    yolo_weights = resolve_model_path(MODEL_ROOT, "YOLO_WEIGHTS")
+    m1_ckpt = resolve_model_path(MODEL_ROOT, "M1_CKPT")
+    m3_ckpt = resolve_model_path(MODEL_ROOT, "M3_CKPT")
+    cfg = load_runtime_config(MODEL_ROOT)
+    m2_gcam_ckpt = resolve_model_path(MODEL_ROOT, "M2_GCAM_CKPT")
+
+    yolo_model = YOLO(str(yolo_weights))
     
     # --- M1 (DenseNet121) ---
     m1_model = create_model("densenet121", num_classes=2).to(device)
-    m1_model.load_state_dict(torch.load(M1_CKPT, map_location=device))
+    m1_model.load_state_dict(torch.load(m1_ckpt, map_location=device))
     m1_model.eval()
     gcam_m1 = GradCAM(m1_model, get_target_layer(m1_model, "densenet121"))
 
     # --- M2 (Stacking Meta Classifier for inference) ---
-    cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
     meta_clf = joblib.load(cfg["meta_clf_path"])
     thr2_val = float(cfg.get("thr2_default", 0.5))
     
@@ -196,7 +298,6 @@ def init_models():
     m2_model = M2Stacker(m2_base_models, meta_clf, device=device)
     # --- M2 (Standalone EfficientNet-B0 for Grad-CAM) ---
     # The user specifically requested this model for M2 heatmaps
-    m2_gcam_ckpt = PROJ_ROOT / "outputs_bin(1),(2,3,4)" / "_best_model" / "best_efficientnet_b0.pth"
     m2_gcam_model = create_model("efficientnet_b0", num_classes=2).to(device)
     if m2_gcam_ckpt.exists():
         m2_gcam_model.load_state_dict(torch.load(m2_gcam_ckpt, map_location=device))
@@ -205,7 +306,7 @@ def init_models():
 
     # --- M3 (DenseNet121) ---
     m3_model = create_model("densenet121", num_classes=2).to(device)
-    m3_model.load_state_dict(torch.load(M3_CKPT, map_location=device))
+    m3_model.load_state_dict(torch.load(m3_ckpt, map_location=device))
     m3_model.eval()
     gcam_m3 = GradCAM(m3_model, get_target_layer(m3_model, "densenet121"))
     
