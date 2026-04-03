@@ -17,8 +17,10 @@
 3.  **邏輯整合**：
     * 綜合上述模型輸出最終分期結果。
 
-![Validation Confusion Matrix](outputs_hierarchical_4class/confusion_matrix_val.png)
-![Test Confusion Matrix](outputs_hierarchical_4class/confusion_matrix_test.png)
+<p align="center">
+  <img src="outputs_hierarchical_4class/confusion_matrix_val.png" width="49%">
+  <img src="outputs_hierarchical_4class/confusion_matrix_test.png" width="49%">
+</p>
 
 ---
 
