@@ -52,10 +52,10 @@ def running_on_render() -> bool:
 
 
 def get_model_root() -> Path:
-    override = os.environ.get("MODEL_ROOT")
+    override = os.environ.get("MODEL_ROOT", "").strip()
     if override:
         return Path(override)
-    if os.environ.get("MODEL_ASSET_BASE_URL"):
+    if os.environ.get("MODEL_ASSET_BASE_URL", "").strip():
         return DEPLOY_MODEL_ROOT
     return LOCAL_MODEL_ROOT
 
@@ -65,7 +65,7 @@ def ensure_parent(path: Path):
 
 
 def download_model_assets(model_root: Path):
-    base_url = os.environ.get("MODEL_ASSET_BASE_URL", "").rstrip("/")
+    base_url = os.environ.get("MODEL_ASSET_BASE_URL", "").strip().rstrip("/")
     if not base_url:
         return
 
@@ -104,10 +104,12 @@ def resolve_optional_model_path(model_root: Path, primary_key: str, fallback_key
 
 MODEL_ROOT = get_model_root()
 
-YOLO_WEIGHTS = resolve_model_path(MODEL_ROOT, "YOLO_WEIGHTS") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["YOLO_WEIGHTS"]
-M1_CKPT = resolve_model_path(MODEL_ROOT, "M1_CKPT") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["M1_CKPT"]
-M3_CKPT = resolve_model_path(MODEL_ROOT, "M3_CKPT") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["M3_CKPT"]
-CFG_PATH = resolve_model_path(MODEL_ROOT, "CFG_PATH") if not os.environ.get("MODEL_ASSET_BASE_URL") else MODEL_ROOT / MODEL_FILES["CFG_PATH"]
+HAS_REMOTE_MODEL_ASSETS = bool(os.environ.get("MODEL_ASSET_BASE_URL", "").strip())
+
+YOLO_WEIGHTS = resolve_model_path(MODEL_ROOT, "YOLO_WEIGHTS") if not HAS_REMOTE_MODEL_ASSETS else MODEL_ROOT / MODEL_FILES["YOLO_WEIGHTS"]
+M1_CKPT = resolve_model_path(MODEL_ROOT, "M1_CKPT") if not HAS_REMOTE_MODEL_ASSETS else MODEL_ROOT / MODEL_FILES["M1_CKPT"]
+M3_CKPT = resolve_model_path(MODEL_ROOT, "M3_CKPT") if not HAS_REMOTE_MODEL_ASSETS else MODEL_ROOT / MODEL_FILES["M3_CKPT"]
+CFG_PATH = resolve_model_path(MODEL_ROOT, "CFG_PATH") if not HAS_REMOTE_MODEL_ASSETS else MODEL_ROOT / MODEL_FILES["CFG_PATH"]
 
 app = Flask(__name__)
 device = "cpu"  # 強制使用 CPU 避免 CUDA kernel image mismatch 錯誤
