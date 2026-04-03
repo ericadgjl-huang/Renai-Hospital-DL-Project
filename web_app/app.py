@@ -34,6 +34,18 @@ MODEL_FILES = {
     "M2_META": Path("03.5_combination") / "03.25_m2_stacking_top3" / "meta" / "m2_meta_logreg.pkl",
 }
 
+MODEL_ASSET_FILENAMES = {
+    "YOLO_WEIGHTS": "best.pt",
+    "M1_CKPT": "m1_best_densenet121.pth",
+    "M3_CKPT": "m3_best_densenet121.pth",
+    "CFG_PATH": "config.json",
+    "M2_GCAM_CKPT": "m2_best_efficientnet_b0.pth",
+    "M2_BASE_EFFICIENTNET": "m2_best_efficientnet_b0.pth",
+    "M2_BASE_RESNET50": "m2_best_resnet50.pth",
+    "M2_BASE_CONVNEXT": "m2_best_convnext_tiny.pth",
+    "M2_META": "m2_meta_logreg.pkl",
+}
+
 
 def running_on_render() -> bool:
     return bool(os.environ.get("RENDER"))
@@ -58,12 +70,13 @@ def download_model_assets(model_root: Path):
         return
 
     print("MODEL_ASSET_BASE_URL detected, ensuring model files are downloaded...", flush=True)
-    for rel_path in MODEL_FILES.values():
+    for key, rel_path in MODEL_FILES.items():
         target = model_root / rel_path
         if target.exists():
             continue
         ensure_parent(target)
-        source_url = f"{base_url}/{rel_path.name}"
+        asset_name = MODEL_ASSET_FILENAMES[key]
+        source_url = f"{base_url}/{asset_name}"
         print(f"Downloading {source_url} -> {target}", flush=True)
         with urllib.request.urlopen(source_url) as response, target.open("wb") as output_file:
             shutil.copyfileobj(response, output_file)
@@ -80,6 +93,13 @@ def resolve_model_path(model_root: Path, key: str) -> Path:
         return fallback
 
     raise FileNotFoundError(f"Missing required model file: {rel_path}")
+
+
+def resolve_optional_model_path(model_root: Path, primary_key: str, fallback_key: str) -> Path:
+    try:
+        return resolve_model_path(model_root, primary_key)
+    except FileNotFoundError:
+        return resolve_model_path(model_root, fallback_key)
 
 
 MODEL_ROOT = get_model_root()
@@ -272,7 +292,7 @@ def init_models():
     m1_ckpt = resolve_model_path(MODEL_ROOT, "M1_CKPT")
     m3_ckpt = resolve_model_path(MODEL_ROOT, "M3_CKPT")
     cfg = load_runtime_config(MODEL_ROOT)
-    m2_gcam_ckpt = resolve_model_path(MODEL_ROOT, "M2_GCAM_CKPT")
+    m2_gcam_ckpt = resolve_optional_model_path(MODEL_ROOT, "M2_GCAM_CKPT", "M2_BASE_EFFICIENTNET")
 
     yolo_model = YOLO(str(yolo_weights))
     
