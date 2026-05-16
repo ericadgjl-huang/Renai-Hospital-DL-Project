@@ -105,18 +105,24 @@ def train_one(
             "val_acc": val_acc,
             "val_macro_f1": val_macro_f1,
         })
+        retrain_mode = epochs_override is not None
+        improved = (not retrain_mode) and val_macro_f1 > best_macro_f1
+        if retrain_mode:
+            val_tag = "  [retrain on full 80%, no val]"
+        else:
+            marker = "  <- new best (val_macro_f1)" if improved else ""
+            val_tag = f"  val_acc={val_acc:.3f} val_macro_f1={val_macro_f1:.4f}{marker}"
         print(
             f"  [{backbone}] epoch {ep:02d}/{n_epochs}  loss={train_loss:.4f} "
-            f"acc={train_acc:.3f}  val_acc={val_acc:.3f} val_f1={val_macro_f1:.3f}",
+            f"acc={train_acc:.3f}{val_tag}",
             flush=True,
         )
 
-        if epochs_override is None:
-            if val_macro_f1 > best_macro_f1:
-                best_macro_f1 = val_macro_f1
-                best_acc = val_acc
-                best_epoch = ep
-                torch.save(model.state_dict(), ckpt_path)
+        if improved:
+            best_macro_f1 = val_macro_f1
+            best_acc = val_acc
+            best_epoch = ep
+            torch.save(model.state_dict(), ckpt_path)
 
     if epochs_override is not None:
         torch.save(model.state_dict(), ckpt_path)
