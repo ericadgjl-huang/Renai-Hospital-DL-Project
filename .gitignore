@@ -1,27 +1,41 @@
-# --- 忽略 Python 快取與 Jupyter Notebook 暫存 ---
+# --- Python / Jupyter ---
 __pycache__/
 *.py[cod]
+*.egg-info/
 .ipynb_checkpoints/
+build/
+dist/
+.pytest_cache/
 
-# --- 忽略原始數據與處理過的數據 (保護個資與節省空間) ---
-drive-download-*/
-yolo_dataset_process/
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- Data (large, sensitive — keep local only) ---
 stage_cls_dataset/
-vis_all_roi_side/
-vis_test_pred/
+yolo_dataset_process/
+drive-download-*/
+data/
 
-# --- 忽略模型權重檔 (檔案通常很大) ---
+# --- Training outputs (rebuild from scratch with scripts/) ---
+outputs/
+
+# --- Model weights (use GitHub Releases or external storage) ---
 weights/
 *.pt
 *.pth
 *.onnx
+*.pkl
 
-# --- 忽略訓練輸出結果與 Checkpoints ---
-outputs_*/
-03.5_combination/
-combination_graphs/
-m*_gradcam_*/
-
-# --- 忽略作業系統縮圖 ---
-Thumbs.db
-Desktop.ini
+# --- Web app local artifacts ---
+web_app/_model_cache/
+web_app/_runtime.json
+web_app/temp.jpg

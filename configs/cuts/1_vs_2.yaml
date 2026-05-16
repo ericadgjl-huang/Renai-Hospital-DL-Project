@@ -1,0 +1,4 @@
+name: 1_vs_2
+description: stage 1 vs 2 (leaf cut for T1 and T5)
+positives_zero: [1]
+positives_one:  [2]

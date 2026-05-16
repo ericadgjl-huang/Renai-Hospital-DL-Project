@@ -1,0 +1,4 @@
+name: 1_vs_234
+description: stage 1 vs 2/3/4 (root cut for T2 and T3)
+positives_zero: [1]
+positives_one:  [2, 3, 4]

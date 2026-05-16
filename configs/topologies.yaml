@@ -1,0 +1,51 @@
+# All 5 binary-tree topologies on 4 ordered stages and the 10 binary cuts they
+# require in total. The runtime source-of-truth lives in
+# src/renai/hierarchy.py; this file is the human-readable mirror.
+
+topologies:
+  T1:
+    description: ((1,2),(3,4))
+    rules:
+      - {cut: 12_vs_34, left: [1, 2], right: [3, 4]}
+      - {cut: 1_vs_2,   left: [1],    right: [2]}
+      - {cut: 3_vs_4,   left: [3],    right: [4]}
+
+  T2:
+    description: (1,(2,(3,4)))
+    rules:
+      - {cut: 1_vs_234, left: [1],    right: [2, 3, 4]}
+      - {cut: 2_vs_34,  left: [2],    right: [3, 4]}
+      - {cut: 3_vs_4,   left: [3],    right: [4]}
+
+  T3:
+    description: (1,((2,3),4))
+    rules:
+      - {cut: 1_vs_234, left: [1],    right: [2, 3, 4]}
+      - {cut: 23_vs_4,  left: [2, 3], right: [4]}
+      - {cut: 2_vs_3,   left: [2],    right: [3]}
+
+  T4:
+    description: ((1,(2,3)),4)
+    rules:
+      - {cut: 123_vs_4, left: [1, 2, 3], right: [4]}
+      - {cut: 1_vs_23,  left: [1],       right: [2, 3]}
+      - {cut: 2_vs_3,   left: [2],       right: [3]}
+
+  T5:
+    description: (((1,2),3),4)
+    rules:
+      - {cut: 123_vs_4, left: [1, 2, 3], right: [4]}
+      - {cut: 12_vs_3,  left: [1, 2],    right: [3]}
+      - {cut: 1_vs_2,   left: [1],       right: [2]}
+
+cuts_used:
+  - 1_vs_234
+  - 12_vs_34
+  - 123_vs_4
+  - 2_vs_34
+  - 23_vs_4
+  - 1_vs_23
+  - 12_vs_3
+  - 2_vs_3
+  - 1_vs_2
+  - 3_vs_4

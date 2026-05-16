@@ -1,0 +1,4 @@
+name: 12_vs_3
+description: stages 1+2 vs 3 (used in T5 after stage 4 ruled out)
+positives_zero: [1, 2]
+positives_one:  [3]

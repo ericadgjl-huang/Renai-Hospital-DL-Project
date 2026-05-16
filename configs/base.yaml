@@ -1,0 +1,19 @@
+# Defaults shared by every cut.  CLI flags override these.
+seed: 42
+img_size: 384
+batch_size: 16
+epochs: 30
+lr: 1.0e-4
+n_splits: 5
+test_ratio: 0.2
+
+backbones:
+  - efficientnet_b0
+  - efficientnet_b1
+  - resnet50
+  - convnext_tiny
+  - convnext_small
+
+normalize:
+  mean: [0.5, 0.5, 0.5]
+  std:  [0.5, 0.5, 0.5]

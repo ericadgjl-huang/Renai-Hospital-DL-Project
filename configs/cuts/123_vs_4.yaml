@@ -1,0 +1,4 @@
+name: 123_vs_4
+description: stages 1/2/3 vs 4 (root cut for T4 and T5)
+positives_zero: [1, 2, 3]
+positives_one:  [4]

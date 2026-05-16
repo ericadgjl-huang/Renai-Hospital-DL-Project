@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renai-knee-staging"
+version = "0.1.0"
+description = "Knee X-ray hierarchical 4-stage classifier with cross-validation, ensembling, and hierarchy search"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "Renai Hospital Project" }]
+
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "matplotlib",
+    "Pillow",
+    "PyYAML",
+    "joblib",
+    "opencv-python",
+    "tqdm",
+    "ultralytics",
+    "flask",
+]
+
+[project.scripts]
+renai-train-cv         = "renai.cli.train_cv:main"
+renai-train-all-cuts   = "renai.cli.train_all_cuts:main"
+renai-build-ensemble   = "renai.cli.build_ensemble:main"
+renai-search-hierarchy = "renai.cli.search_hierarchy:main"
+renai-update-web       = "renai.cli.update_web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+renai = ["py.typed"]

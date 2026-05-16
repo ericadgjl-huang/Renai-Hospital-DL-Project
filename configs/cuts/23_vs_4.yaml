@@ -1,0 +1,4 @@
+name: 23_vs_4
+description: stages 2+3 vs 4 (used in T3 after stage 1 ruled out)
+positives_zero: [2, 3]
+positives_one:  [4]

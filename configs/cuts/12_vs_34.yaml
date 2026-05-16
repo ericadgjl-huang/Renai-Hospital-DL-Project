@@ -1,0 +1,4 @@
+name: 12_vs_34
+description: stages 1+2 vs 3+4 (root cut for T1)
+positives_zero: [1, 2]
+positives_one:  [3, 4]
