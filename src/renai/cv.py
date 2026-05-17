@@ -9,10 +9,9 @@ Pipeline per cut:
 
 from __future__ import annotations
 
-import json
 import math
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -102,7 +101,7 @@ def run_cv_for_cut(
         fold_results = []
         for fi, (tr_idx, va_idx) in enumerate(folds):
             print(f"  fold {fi}: |train|={len(tr_idx)}  |val|={len(va_idx)}", flush=True)
-            set_seed(SEED + fi)  # deterministic but fold-dependent
+            set_seed(SEED + fi)
             fold_dir = cv_root / f"fold_{fi}" / backbone
             tr_loader, va_loader = make_loaders_for_cut(
                 data_root, cut, tr_idx, va_idx, batch_size=batch_size,
@@ -117,7 +116,6 @@ def run_cv_for_cut(
                 lr=lr,
             )
 
-            # Eval on val with full metrics
             model = create_model(backbone, num_classes=2).to(device)
             model.load_state_dict(torch.load(tr.ckpt_path, map_location=device))
             y_true, y_pred, probs = predict_loader(model, va_loader, device)
@@ -185,7 +183,8 @@ def run_cv_for_cut(
             epochs_override=mean_best_epoch,
         )
 
-        # Eval final on outer test set
+        # Eval final on outer test set (per-backbone diagnostic — selection
+        # in scripts/05 uses OOF, not these test numbers).
         model = create_model(backbone, num_classes=2).to(device)
         model.load_state_dict(torch.load(tr_final.ckpt_path, map_location=device))
         y_true, y_pred, probs = predict_loader(model, test_loader, device)
@@ -200,7 +199,6 @@ def run_cv_for_cut(
             y_true, y_pred, list(cut.class_names),
             final_dir / "classification_report_test.txt",
         )
-        # Save test probs for later ensembling
         import numpy as np
         np.save(final_dir / "test_probs.npy", probs)
         np.save(final_dir / "test_y_true.npy", y_true)

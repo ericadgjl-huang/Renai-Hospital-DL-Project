@@ -32,7 +32,7 @@ def main():
             device=args.device,
             batch_size=args.batch_size,
         )
-        print(f"  -> winner: {decision.chosen}  macro_f1={decision.test_macro_f1:.4f}")
+        print(f"  -> winner: {decision.chosen}  oof_macro_f1={decision.oof_macro_f1:.4f}")
 
 
 if __name__ == "__main__":
