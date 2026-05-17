@@ -1,4 +1,4 @@
-"""Run 5-fold CV + final retrain for a single cut (all 5 backbones)."""
+"""Run 5-fold CV for a single cut (all 5 backbones)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,10 @@ def main():
     print("\n=== summary ===")
     print(f"  written -> {res.summary_csv}")
     for bb, stats in res.per_backbone.items():
-        print(f"  {bb:18s}  cv_macro_f1={stats['cv_mean_macro_f1']}±{stats['cv_std_macro_f1']}  test_macro_f1={stats['test_macro_f1']}")
+        print(
+            f"  {bb:18s}  cv_macro_f1={stats['cv_mean_macro_f1']}+/-{stats['cv_std_macro_f1']}  "
+            f"acc={stats['cv_mean_acc']}  auc={stats['cv_mean_auc']}  folds={stats['n_folds']}"
+        )
 
 
 if __name__ == "__main__":

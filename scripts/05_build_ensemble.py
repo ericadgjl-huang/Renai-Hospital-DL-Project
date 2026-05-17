@@ -1,4 +1,4 @@
-"""Stage 05 — Build top-3 ensemble + decide vs single best, per cut.
+"""Stage 05 — Soft-vote every per-fold best ckpt for each cut.
 
 Usage:
     python scripts/05_build_ensemble.py            # all cuts that have CV done

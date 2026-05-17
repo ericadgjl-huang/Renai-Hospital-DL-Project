@@ -1,155 +1,109 @@
-"""Top-3 cross-family ensemble for one cut.
+"""Fold-level soft-voting ensemble for one cut.
 
-Two ensemble strategies are implemented and compared on the test set:
-  (a) soft-voting   — mean of softmax probabilities
-  (b) stacking      — LogisticRegression meta classifier trained on
-                      out-of-fold val probabilities (kept consistent with the
-                      original 03.25_m2_stacking_top3 design)
+For each cut we take the 25 validation-best checkpoints (5 backbones x 5 folds)
+saved by `renai.cv` and average their softmax probabilities on the outer 20%
+test set.  This is a textbook cross-validation / bagging ensemble — every
+checkpoint was the best one on its own fold's validation, so no per-fold model
+ever sees the outer test split during training.
 
-For each cut we compare:
-  - best single backbone (by test_macro_f1)
-  - voting ensemble of top-3 cross-family
-  - stacking ensemble of top-3 cross-family
-and write the winner to outputs/cuts/<cut>/ensemble/winner.json.
-
-If the best ensemble does not beat the best single model on macro_f1, the
-single model is declared the winner — that matches the user's spec ("如果真的
-有變好就使用集成的，但如果沒有變好就使用單一模型")."""
+No more "single vs ensemble" decision: the soft-vote of all available fold
+models is always the winner.  No stacking either — fold-level stacking would
+require a held-out set that we don't have."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
-import joblib
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from sklearn.linear_model import LogisticRegression
 
 from .data import (
     Cut,
     filter_indices_for_cut,
-    make_cv_folds,
     make_eval_loader_for_cut,
     make_outer_split,
 )
 from .eval import (
     binary_metrics,
     dump_json,
-    predict_loader,
     save_classification_report,
     save_confusion_matrix,
 )
-from .models import FAMILY_OF, create_model
+from .models import DEFAULT_BACKBONES, create_model
 from .seed import SEED, set_seed
 
 
 @dataclass
 class EnsembleDecision:
     cut: str
-    chosen: str                # "single" | "voting" | "stacking"
-    chosen_backbone: str | None
-    chosen_members: list[str]
+    chosen: str                            # always "fold_voting" in the new pipeline
+    members: list[dict]                    # [{"backbone": ..., "fold": ..., "ckpt": ...}]
     test_macro_f1: float
     test_accuracy: float
     test_auc: float
     artifacts_dir: str
 
 
-def _pick_top3_cross_family(summary_csv: Path) -> list[str]:
-    """Pick the best backbone per family on cv_mean_macro_f1, return up to 3."""
-    df = pd.read_csv(summary_csv)
-    df = df.dropna(subset=["cv_mean_macro_f1"])
-    df["family"] = df["backbone"].map(FAMILY_OF)
-    best_per_family = (
-        df.sort_values("cv_mean_macro_f1", ascending=False)
-        .drop_duplicates("family")
-    )
-    return best_per_family["backbone"].head(3).tolist()
+def discover_fold_ckpts(
+    cut_root: Path,
+    backbones: Sequence[str] = DEFAULT_BACKBONES,
+) -> list[dict]:
+    """Return every (backbone, fold, ckpt) tuple that has been trained so far."""
+    cv_root = cut_root / "cv"
+    members: list[dict] = []
+    if not cv_root.exists():
+        return members
+    for fold_dir in sorted(cv_root.glob("fold_*")):
+        try:
+            fi = int(fold_dir.name.split("_")[1])
+        except ValueError:
+            continue
+        for bb in backbones:
+            ckpt = fold_dir / bb / f"best_{bb}.pth"
+            if ckpt.exists():
+                members.append({"backbone": bb, "fold": fi, "ckpt": str(ckpt)})
+    return members
 
 
-def _load_finals(cut_root: Path, backbones: Sequence[str], device: str):
-    models = []
-    for bb in backbones:
-        ckpt = cut_root / "final" / bb / f"best_{bb}.pth"
+@torch.no_grad()
+def _avg_softmax_on_loader(members: list[dict], loader, device: str) -> np.ndarray:
+    """Mean softmax over all members for every sample yielded by `loader`."""
+    sums: np.ndarray | None = None
+    n_seen = 0
+    for entry in members:
+        bb = entry["backbone"]
+        ckpt = entry["ckpt"]
         m = create_model(bb, num_classes=2).to(device)
         m.load_state_dict(torch.load(ckpt, map_location=device))
         m.eval()
-        models.append((bb, m))
-    return models
+        per_model = []
+        for imgs, _labels in loader:
+            p = F.softmax(m(imgs.to(device)), dim=1).cpu().numpy()
+            per_model.append(p)
+        del m
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        per_model_np = np.concatenate(per_model) if per_model else np.zeros((0, 2))
+        if sums is None:
+            sums = np.zeros_like(per_model_np)
+            n_seen = 0
+        sums += per_model_np
+        n_seen += 1
+    if sums is None or n_seen == 0:
+        return np.zeros((0, 2))
+    return sums / float(n_seen)
 
 
 @torch.no_grad()
-def _oof_features(
-    cut_root: Path,
-    cut: Cut,
-    data_root: Path,
-    backbones: Sequence[str],
-    folds,
-    device: str,
-    batch_size: int,
-) -> tuple[np.ndarray, np.ndarray, list[int]]:
-    """Out-of-fold softmax features from per-fold checkpoints.
-
-    For each sample in the cut's train+val pool we use the fold model that
-    treated it as validation — never one that saw it during training.  This is
-    the only way to feed a stacking meta-classifier without data leakage."""
-    n_total = sum(len(va) for _, va in folds)
-    K = len(backbones)
-    X = np.zeros((n_total, 2 * K), dtype=np.float32)
-    y = np.zeros((n_total,), dtype=np.int64)
-    sample_indices: list[int] = []
-
-    cursor = 0
-    for fi, (_tr, va) in enumerate(folds):
-        loader = make_eval_loader_for_cut(data_root, cut, va, batch_size=batch_size)
-        # collect labels once
-        ys_local: list[int] = []
-        per_model_probs: list[list[np.ndarray]] = [[] for _ in backbones]
-        for k, bb in enumerate(backbones):
-            ckpt = cut_root / "cv" / f"fold_{fi}" / bb / f"best_{bb}.pth"
-            if not ckpt.exists():
-                # Fall back to final ckpt if a per-fold one is missing.
-                ckpt = cut_root / "final" / bb / f"best_{bb}.pth"
-            m = create_model(bb, num_classes=2).to(device)
-            m.load_state_dict(torch.load(ckpt, map_location=device))
-            m.eval()
-            for imgs, labels in loader:
-                p = F.softmax(m(imgs.to(device)), dim=1).cpu().numpy()
-                per_model_probs[k].append(p)
-                if k == 0:
-                    ys_local.extend(int(l) for l in labels.numpy().tolist())
-            del m
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        n_local = len(ys_local)
-        for k in range(K):
-            X[cursor:cursor + n_local, 2 * k:2 * k + 2] = np.concatenate(per_model_probs[k])
-        y[cursor:cursor + n_local] = np.asarray(ys_local)
-        sample_indices.extend(va)
-        cursor += n_local
-
-    return X, y, sample_indices
-
-
-@torch.no_grad()
-def _stack_probs(models, loader, device) -> tuple[np.ndarray, np.ndarray]:
-    """Return (X_stack [N, 2*K], y [N]) for the loader."""
-    feats_per_model = [[] for _ in models]
+def _collect_labels(loader) -> np.ndarray:
     ys = []
-    for imgs, labels in loader:
-        imgs = imgs.to(device)
-        for k, (_, m) in enumerate(models):
-            p = F.softmax(m(imgs), dim=1).cpu().numpy()
-            feats_per_model[k].append(p)
+    for _imgs, labels in loader:
         ys.append(np.asarray(labels))
-    X = np.concatenate([np.concatenate(fs) for fs in feats_per_model], axis=1) if feats_per_model[0] else np.zeros((0, 2 * len(models)))
-    y = np.concatenate(ys) if ys else np.array([])
-    return X, y
+    return np.concatenate(ys) if ys else np.array([])
 
 
 def build_ensemble_for_cut(
@@ -159,123 +113,76 @@ def build_ensemble_for_cut(
     splits_dir: Path,
     device: str = "cuda",
     batch_size: int = 16,
+    backbones: Sequence[str] = DEFAULT_BACKBONES,
 ) -> EnsembleDecision:
+    """Soft-vote every available per-fold best ckpt for this cut and evaluate
+    the average on the 20% outer test set."""
     set_seed(SEED)
     cut_root = out_root / "cuts" / cut.name
     ens_dir = cut_root / "ensemble"
     ens_dir.mkdir(parents=True, exist_ok=True)
 
-    summary_csv = cut_root / "summary.csv"
-    if not summary_csv.exists():
-        raise FileNotFoundError(f"Run CV first; missing {summary_csv}")
-    df = pd.read_csv(summary_csv)
+    members = discover_fold_ckpts(cut_root, backbones=backbones)
+    if not members:
+        raise FileNotFoundError(
+            f"No per-fold ckpts under {cut_root / 'cv'} — run train_cv first."
+        )
 
-    # --- top-3 cross-family ---
-    top3 = _pick_top3_cross_family(summary_csv)
-    members = _load_finals(cut_root, top3, device)
-
-    # --- gather OOF val features for stacking ---
     outer = make_outer_split(data_root, splits_dir / "outer_split.json")
-    cut_train_val_idx = filter_indices_for_cut(data_root, outer["train_val_idx"], cut)
-    cut_test_idx      = filter_indices_for_cut(data_root, outer["test_idx"],      cut)
-    folds = make_cv_folds(data_root, cut_train_val_idx)
-    test_loader = make_eval_loader_for_cut(data_root, cut, cut_test_idx, batch_size=batch_size)
-
-    # OOF features for meta training (no leakage)
-    X_val, y_val, _ = _oof_features(
-        cut_root=cut_root,
-        cut=cut,
-        data_root=data_root,
-        backbones=top3,
-        folds=folds,
-        device=device,
-        batch_size=batch_size,
+    cut_test_idx = filter_indices_for_cut(data_root, outer["test_idx"], cut)
+    test_loader = make_eval_loader_for_cut(
+        data_root, cut, cut_test_idx, batch_size=batch_size,
     )
-    # Test features come from the FINAL retrained models (one per backbone)
-    X_test, y_test = _stack_probs(members, test_loader, device)
 
-    meta = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=SEED)
-    meta.fit(X_val, y_val)
-    joblib.dump(meta, ens_dir / "meta_logreg.pkl")
-    np.save(ens_dir / "X_test.npy", X_test)
-    np.save(ens_dir / "y_test.npy", y_test)
+    y_test = _collect_labels(test_loader)
+    avg_probs = _avg_softmax_on_loader(members, test_loader, device)
+    y_pred = avg_probs.argmax(axis=1) if len(avg_probs) else np.array([], dtype=np.int64)
+    test_metrics = binary_metrics(y_test, y_pred, avg_probs)
 
-    # --- stacking metrics ---
-    stack_pred = meta.predict(X_test)
-    stack_probs2 = meta.predict_proba(X_test)
-    stack_metrics = binary_metrics(y_test, stack_pred, stack_probs2)
-
-    # --- voting metrics: average softmax across members ---
-    K = len(members)
-    avg_probs = np.zeros_like(stack_probs2)
-    for k in range(K):
-        avg_probs += X_test[:, 2 * k:2 * k + 2]
-    avg_probs /= max(K, 1)
-    vote_pred = avg_probs.argmax(axis=1)
-    vote_metrics = binary_metrics(y_test, vote_pred, avg_probs)
-
-    # --- best single (from summary.csv test_macro_f1) ---
-    df_ok = df.dropna(subset=["test_macro_f1"]).sort_values("test_macro_f1", ascending=False)
-    best_single = df_ok.iloc[0] if len(df_ok) else None
-    single_metrics = (
-        {
-            "macro_f1": float(best_single["test_macro_f1"]),
-            "accuracy": float(best_single["test_acc"]),
-            "auc": float(best_single.get("test_auc", float("nan"))),
-        }
-        if best_single is not None else
-        {"macro_f1": float("-inf"), "accuracy": 0.0, "auc": float("nan")}
+    np.save(ens_dir / "test_probs.npy", avg_probs)
+    np.save(ens_dir / "test_y_true.npy", y_test)
+    save_confusion_matrix(
+        y_test, y_pred, list(cut.class_names),
+        ens_dir / "confusion_matrix_test.png",
+        title=f"{cut.name} | fold soft-vote ({len(members)} models)",
     )
-    best_single_bb = str(best_single["backbone"]) if best_single is not None else None
-
-    candidates = {
-        "single":   {"backbone": best_single_bb, "members": [best_single_bb] if best_single_bb else [], **single_metrics},
-        "voting":   {"backbone": None,           "members": top3, **vote_metrics},
-        "stacking": {"backbone": None,           "members": top3, **stack_metrics},
-    }
-
-    # Choose: ensemble wins only if its macro_f1 > single by some margin.
-    # User spec: "如果真的有變好就使用集成的，但如果沒有變好就使用單一模型"
-    # → require strict improvement.
-    single_f1 = candidates["single"]["macro_f1"]
-    best_ens_name = max(("voting", "stacking"), key=lambda k: candidates[k]["macro_f1"])
-    if candidates[best_ens_name]["macro_f1"] > single_f1:
-        chosen = best_ens_name
-    else:
-        chosen = "single"
+    save_classification_report(
+        y_test, y_pred, list(cut.class_names),
+        ens_dir / "classification_report_test.txt",
+    )
 
     decision = EnsembleDecision(
         cut=cut.name,
-        chosen=chosen,
-        chosen_backbone=best_single_bb if chosen == "single" else None,
-        chosen_members=top3 if chosen != "single" else [best_single_bb] if best_single_bb else [],
-        test_macro_f1=float(candidates[chosen]["macro_f1"]),
-        test_accuracy=float(candidates[chosen]["accuracy"]),
-        test_auc=float(candidates[chosen].get("auc", float("nan"))),
+        chosen="fold_voting",
+        members=members,
+        test_macro_f1=float(test_metrics["macro_f1"]),
+        test_accuracy=float(test_metrics["accuracy"]),
+        test_auc=float(test_metrics.get("auc", float("nan"))),
         artifacts_dir=str(ens_dir),
     )
-
-    # Write outcomes
-    dump_json({"candidates": candidates, "decision": asdict(decision)}, ens_dir / "winner.json")
-    if chosen == "stacking":
-        save_confusion_matrix(
-            y_test, stack_pred, list(cut.class_names),
-            ens_dir / "confusion_matrix_test.png",
-            title=f"{cut.name} | stacking",
-        )
-        save_classification_report(
-            y_test, stack_pred, list(cut.class_names),
-            ens_dir / "classification_report_test.txt",
-        )
-    elif chosen == "voting":
-        save_confusion_matrix(
-            y_test, vote_pred, list(cut.class_names),
-            ens_dir / "confusion_matrix_test.png",
-            title=f"{cut.name} | voting",
-        )
-        save_classification_report(
-            y_test, vote_pred, list(cut.class_names),
-            ens_dir / "classification_report_test.txt",
-        )
-
+    dump_json(
+        {
+            "decision": asdict(decision),
+            "test_metrics": test_metrics,
+            "n_members": len(members),
+        },
+        ens_dir / "winner.json",
+    )
     return decision
+
+
+def summarize_all_cuts(out_root: Path) -> pd.DataFrame:
+    """Roll every cut's ensemble winner.json into a single table."""
+    rows = []
+    for winner_path in (out_root / "cuts").glob("*/ensemble/winner.json"):
+        import json
+        info = json.loads(winner_path.read_text(encoding="utf-8"))
+        d = info["decision"]
+        rows.append({
+            "cut": d["cut"],
+            "n_members": info.get("n_members", len(d.get("members", []))),
+            "test_macro_f1": d["test_macro_f1"],
+            "test_accuracy": d["test_accuracy"],
+            "test_auc": d["test_auc"],
+        })
+    return pd.DataFrame(rows).sort_values("cut") if rows else pd.DataFrame()

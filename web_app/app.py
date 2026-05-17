@@ -2,8 +2,8 @@
 
 Reads `web_app/_runtime.json` (written by scripts/07_update_web.py) at startup
 and builds a tree of cut predictors that match the topology chosen by the
-hierarchy search. The app does not hard-code any cut names or backbones — to
-update the deployment, retrain the cuts and rerun the update_web script.
+hierarchy search. Each cut predictor is a soft-vote of every per-fold best
+checkpoint (5 backbones x 5 folds = up to 25 models per cut).
 
 If `_runtime.json` is missing the app still boots but every /predict call
 returns a clear "models not configured yet" error.
@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 
 import cv2
-import joblib
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -28,7 +27,6 @@ from flask import Flask, jsonify, render_template, request
 from PIL import Image
 from ultralytics import YOLO
 
-# Make `renai` importable when running the Flask app directly.
 WEB_APP_DIR = Path(__file__).resolve().parent
 PROJ_ROOT = WEB_APP_DIR.parent
 sys.path.insert(0, str(PROJ_ROOT / "src"))
@@ -36,7 +34,7 @@ sys.path.insert(0, str(PROJ_ROOT / "src"))
 from renai.gradcam import GradCAM  # noqa: E402
 from renai.models import create_model, get_target_layer  # noqa: E402
 
-device = "cpu"  # forced CPU avoids the RTX 5070 / sm_120 PyTorch wheel mismatch
+device = "cpu"
 app = Flask(__name__)
 
 
@@ -54,32 +52,23 @@ def load_runtime() -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Cut predictor (single / voting / stacking) — mirrors renai.hierarchy
+# Cut predictor — soft-vote of every per-fold best ckpt for this cut.
 # ---------------------------------------------------------------------------
 
 class CutPredictor:
-    """Wraps however the cut decided to make predictions: a single backbone,
-    soft-vote of top-3 cross-family models, or stacking with a LogReg meta."""
-
     def __init__(self, cut_name: str, info: dict):
         self.cut_name = cut_name
-        self.kind = info["kind"]                         # 'single' | 'voting' | 'stacking'
-        self.members: list[str] = list(info["members"])  # backbone names
-        self.backbone = info.get("backbone")
-        self.final_dir = Path(info["final_dir"])
-        self.meta_path = info.get("meta_path")
+        self.members: list[dict] = list(info["members"])
 
         self._models: list[tuple[str, torch.nn.Module]] = []
-        for bb in self.members:
-            ckpt = self.final_dir / bb / f"best_{bb}.pth"
+        for entry in self.members:
+            bb = entry["backbone"]
+            ckpt = Path(entry["ckpt"])
             m = create_model(bb, num_classes=2).to(device)
             m.load_state_dict(torch.load(ckpt, map_location=device))
             m.eval()
             self._models.append((bb, m))
 
-        self._meta = joblib.load(self.meta_path) if (self.kind == "stacking" and self.meta_path) else None
-
-        # The first member doubles as the Grad-CAM source (one heatmap per cut).
         if self._models:
             bb0, m0 = self._models[0]
             self._gradcam_backbone = bb0
@@ -90,24 +79,16 @@ class CutPredictor:
 
     @torch.no_grad()
     def prob_class1(self, x: torch.Tensor) -> float:
-        if self.kind == "single":
-            _, m = self._models[0]
-            p = F.softmax(m(x.to(device)), dim=1).cpu().numpy()
-            return float(p[0, 1])
-
-        stacks = []
+        sums = None
         for _, m in self._models:
             p = F.softmax(m(x.to(device)), dim=1).cpu().numpy()
-            stacks.append(p)
-        if self.kind == "voting":
-            return float(np.mean(stacks, axis=0)[0, 1])
-        if self.kind == "stacking" and self._meta is not None:
-            X = np.concatenate(stacks, axis=1)
-            return float(self._meta.predict_proba(X)[0, 1])
-        raise RuntimeError(f"Unknown predictor kind {self.kind}")
+            sums = p if sums is None else sums + p
+        if sums is None:
+            return 0.0
+        avg = sums / float(len(self._models))
+        return float(avg[0, 1])
 
     def gradcam(self, x: torch.Tensor) -> tuple[str, np.ndarray]:
-        """Return (backbone_used_for_gradcam, cam_map). Needs grad → no torch.no_grad."""
         if self._gradcam is None or self._gradcam_backbone is None:
             raise RuntimeError(f"No Grad-CAM available for cut {self.cut_name}")
         x = x.clone().requires_grad_(True)
@@ -127,28 +108,17 @@ class HierarchyRouter:
             cn: CutPredictor(cn, info) for cn, info in runtime["cuts"].items()
         }
 
-    @property
-    def root_rule(self) -> dict:
-        return self.topology["rules"][0]
-
     def predict(self, x: torch.Tensor) -> dict:
-        """Return final stage + per-stage probs + per-cut Grad-CAM info."""
         rules = list(self.topology["rules"])
-        # cumulative probability for the active subset
         per_stage_prob: dict[int, float] = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
 
         cam_data: list[dict] = []
-        # Grad-CAM is computed on every cut used by the topology (one per node)
         for r in rules:
             backbone, cam = self.cuts[r["cut"]].gradcam(x)
             cam_data.append({"cut": r["cut"], "backbone": backbone, "cam": cam})
 
-        # Tree DFS: walk from root, multiplying probs along edges.
-        # Each rule is processed once so we keep a per-cut prob cache.
         prob_cache = {r["cut"]: self.cuts[r["cut"]].prob_class1(x) for r in rules}
 
-        # Compose: at each rule we know P(right_subset | parent) = prob_cache[cut]
-        # Walking down the tree gives joint probs.
         def walk(subset: list[int], parent_prob: float, remaining: list[dict]):
             if len(subset) == 1:
                 per_stage_prob[subset[0]] += parent_prob
@@ -160,7 +130,6 @@ class HierarchyRouter:
                     walk(r["left"],  parent_prob * (1.0 - p_right), rest)
                     walk(r["right"], parent_prob * p_right,         rest)
                     return
-            # Should not happen for a well-formed topology.
             per_stage_prob[subset[0]] += parent_prob
 
         walk([1, 2, 3, 4], 1.0, rules)
@@ -197,11 +166,9 @@ def init_models():
         )
         return
 
-    # YOLO weights live under weights/ (standard layout). The path can be
-    # overridden by setting RENAI_YOLO_WEIGHTS for cloud deployment.
     yolo_weights = Path(os.environ.get("RENAI_YOLO_WEIGHTS", "")).expanduser() if os.environ.get("RENAI_YOLO_WEIGHTS") else PROJ_ROOT / "weights" / "yolo_best.pt"
     if not yolo_weights.exists():
-        yolo_weights = PROJ_ROOT / "weights" / "yolov8n.pt"  # generic fallback
+        yolo_weights = PROJ_ROOT / "weights" / "yolov8n.pt"
     yolo_model = YOLO(str(yolo_weights))
 
     router = HierarchyRouter(runtime)
@@ -267,7 +234,6 @@ def predict():
     img.save(tmp_path)
 
     try:
-        # 1. Detect knee with YOLO
         res = yolo_model.predict(source=str(tmp_path), conf=0.25, device=device, imgsz=640, verbose=False)[0]
         if res.boxes is None or len(res.boxes) == 0:
             return jsonify({"error": "未偵測到髖關節！請更換圖片或降低信心閾值。"}), 400
@@ -287,11 +253,9 @@ def predict():
         annotated_b64 = _b64_image(Image.fromarray(annotated))
         cropped_b64 = _b64_image(cropped_img)
 
-        # 2. Unify orientation
         inference_img = cropped_img if side != "R" else cropped_img.transpose(Image.FLIP_LEFT_RIGHT)
         x = val_tf(inference_img).unsqueeze(0).to(device)
 
-        # 3. Hierarchical prediction + Grad-CAMs
         result = router.predict(x)
         cam_overlays = [
             {
@@ -316,7 +280,6 @@ def predict():
             "sorted_probs": sorted_probs,
             "topology": router.topology["name"] + " " + router.topology["description"],
             "cam_overlays": cam_overlays,
-            # Backwards-compatible aliases for the existing template (uses up to 3 cams)
             "gradcam_m1": cam_overlays[0]["image"] if len(cam_overlays) > 0 else None,
             "gradcam_m2": cam_overlays[1]["image"] if len(cam_overlays) > 1 else None,
             "gradcam_m3": cam_overlays[2]["image"] if len(cam_overlays) > 2 else None,

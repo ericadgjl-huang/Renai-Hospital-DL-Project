@@ -1,4 +1,4 @@
-"""Stage 03 — 5-fold CV + final retrain for one cut.
+"""Stage 03 — 5-fold CV for one cut. Saves the validation-best ckpt per fold.
 
 Usage:
     python scripts/03_train_cv.py --cut 1_vs_234 --epochs 30

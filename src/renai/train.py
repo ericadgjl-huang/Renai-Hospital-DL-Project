@@ -1,4 +1,7 @@
-"""Training loop for one (cut, backbone, fold)."""
+"""Training loop for one (cut, backbone, fold).
+
+The best checkpoint by validation macro-F1 is kept; that ckpt is the artefact
+the downstream fold-voting ensemble consumes."""
 
 from __future__ import annotations
 
@@ -50,16 +53,8 @@ def train_one(
     num_classes: int = 2,
     epochs: int = 30,
     lr: float = 1e-4,
-    epochs_override: int | None = None,
-    early_stop: bool = True,
 ) -> TrainResult:
-    """Train one (backbone, fold).
-
-    Best checkpoint is selected by val macro-F1.  When `epochs_override` is
-    provided we ignore best-tracking and simply train for that many epochs,
-    saving only the last checkpoint — used by the post-CV "retrain on full
-    train+val" stage where there is no held-out validation.
-    """
+    """Train one (backbone, fold). Save the best-by-val-macro-F1 ckpt."""
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / f"best_{backbone}.pth"
     log_path = out_dir / "train_log.csv"
@@ -67,15 +62,13 @@ def train_one(
     model = create_model(backbone, num_classes=num_classes).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    n_epochs = int(epochs_override) if epochs_override else int(epochs)
-
     best_macro_f1 = -1.0
     best_acc = 0.0
     best_epoch = -1
     logs = []
     t0 = time.time()
 
-    for ep in range(1, n_epochs + 1):
+    for ep in range(1, int(epochs) + 1):
         model.train()
         total, correct, total_loss = 0, 0, 0.0
         for imgs, labels in train_loader:
@@ -93,7 +86,7 @@ def train_one(
         train_loss = total_loss / max(total, 1)
         train_acc = correct / max(total, 1)
 
-        if epochs_override is None and val_loader is not None and len(val_loader.dataset) > 0:
+        if val_loader is not None and len(val_loader.dataset) > 0:
             val_acc, val_macro_f1 = _eval_loop(model, val_loader, device)
         else:
             val_acc, val_macro_f1 = float("nan"), float("nan")
@@ -105,16 +98,11 @@ def train_one(
             "val_acc": val_acc,
             "val_macro_f1": val_macro_f1,
         })
-        retrain_mode = epochs_override is not None
-        improved = (not retrain_mode) and val_macro_f1 > best_macro_f1
-        if retrain_mode:
-            val_tag = "  [retrain on full 80%, no val]"
-        else:
-            marker = "  <- new best (val_macro_f1)" if improved else ""
-            val_tag = f"  val_acc={val_acc:.3f} val_macro_f1={val_macro_f1:.4f}{marker}"
+        improved = val_macro_f1 > best_macro_f1
+        marker = "  <- new best (val_macro_f1)" if improved else ""
         print(
-            f"  [{backbone}] epoch {ep:02d}/{n_epochs}  loss={train_loss:.4f} "
-            f"acc={train_acc:.3f}{val_tag}",
+            f"  [{backbone}] epoch {ep:02d}/{int(epochs)}  loss={train_loss:.4f} "
+            f"acc={train_acc:.3f}  val_acc={val_acc:.3f} val_macro_f1={val_macro_f1:.4f}{marker}",
             flush=True,
         )
 
@@ -123,12 +111,6 @@ def train_one(
             best_acc = val_acc
             best_epoch = ep
             torch.save(model.state_dict(), ckpt_path)
-
-    if epochs_override is not None:
-        torch.save(model.state_dict(), ckpt_path)
-        best_epoch = n_epochs
-        best_macro_f1 = float("nan")
-        best_acc = float("nan")
 
     pd.DataFrame(logs).to_csv(log_path, index=False, encoding="utf-8-sig")
 
@@ -140,7 +122,7 @@ def train_one(
         ckpt_path=str(ckpt_path),
         log_path=str(log_path),
         train_time_sec=float(time.time() - t0),
-        epochs_run=n_epochs,
+        epochs_run=int(epochs),
     )
 
 

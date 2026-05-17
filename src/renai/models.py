@@ -1,21 +1,12 @@
 """Backbone factory.
 
-The pool intentionally spans three families: EfficientNet, ResNet, ConvNeXt.
-Top-3 ensemble selection picks one model per family for diversity."""
+The pool intentionally spans three families (EfficientNet, ResNet, ConvNeXt)
+so that the fold-voting ensemble averages across diverse inductive biases."""
 
 from __future__ import annotations
 
 import torch.nn as nn
 import torchvision.models as tvm
-
-# Family map — used by ensemble selection to enforce one-per-family.
-FAMILY_OF: dict[str, str] = {
-    "efficientnet_b0": "efficientnet",
-    "efficientnet_b1": "efficientnet",
-    "resnet50":        "resnet",
-    "convnext_tiny":   "convnext",
-    "convnext_small":  "convnext",
-}
 
 DEFAULT_BACKBONES: tuple[str, ...] = (
     "efficientnet_b0",
