@@ -1,6 +1,6 @@
 """Stage 04 — Run 5-fold CV for every cut needed by all 5 topologies.
 
-This is the long one — 10 cuts × 5 backbones × 5 folds + 10×5 final retrains.
+This is the long one — 10 cuts x 5 backbones x 5 folds.
 Plan for ~hours on a single GPU.
 
 Usage:

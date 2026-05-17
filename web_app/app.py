@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import cv2
+import joblib
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -58,6 +59,7 @@ def load_runtime() -> dict | None:
 class CutPredictor:
     def __init__(self, cut_name: str, info: dict):
         self.cut_name = cut_name
+        self.kind: str = info.get("kind", "fold_voting")
         self.members: list[dict] = list(info["members"])
 
         self._models: list[tuple[str, torch.nn.Module]] = []
@@ -69,6 +71,11 @@ class CutPredictor:
             m.eval()
             self._models.append((bb, m))
 
+        self._meta = None
+        meta_path = info.get("meta_path")
+        if self.kind == "stacking" and meta_path:
+            self._meta = joblib.load(meta_path)
+
         if self._models:
             bb0, m0 = self._models[0]
             self._gradcam_backbone = bb0
@@ -79,14 +86,18 @@ class CutPredictor:
 
     @torch.no_grad()
     def prob_class1(self, x: torch.Tensor) -> float:
+        x = x.to(device)
         sums = None
-        for _, m in self._models:
-            p = F.softmax(m(x.to(device)), dim=1).cpu().numpy()
+        for _bb, m in self._models:
+            p = F.softmax(m(x), dim=1).cpu().numpy()
             sums = p if sums is None else sums + p
         if sums is None:
             return 0.0
-        avg = sums / float(len(self._models))
-        return float(avg[0, 1])
+        avg_softmax = sums / float(len(self._models))   # (1, 2)
+
+        if self.kind == "stacking" and self._meta is not None:
+            return float(self._meta.predict_proba(avg_softmax)[0, 1])
+        return float(avg_softmax[0, 1])
 
     def gradcam(self, x: torch.Tensor) -> tuple[str, np.ndarray]:
         if self._gradcam is None or self._gradcam_backbone is None:

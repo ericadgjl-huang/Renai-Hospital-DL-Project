@@ -32,8 +32,10 @@ def main():
             batch_size=args.batch_size,
         )
         print(
-            f"  -> n_members={len(decision.members)}  "
-            f"test_macro_f1={decision.test_macro_f1:.4f}  "
+            f"  -> chosen={decision.chosen}  n_members={len(decision.members)}\n"
+            f"     OOF voting={decision.oof_macro_f1_voting:.4f}  "
+            f"OOF stacking={decision.oof_macro_f1_stacking:.4f}\n"
+            f"     test_macro_f1={decision.test_macro_f1:.4f}  "
             f"test_acc={decision.test_accuracy:.4f}  "
             f"test_auc={decision.test_auc:.4f}"
         )

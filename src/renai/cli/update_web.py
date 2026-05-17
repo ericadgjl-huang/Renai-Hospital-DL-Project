@@ -25,7 +25,8 @@ def main():
         winner_path = args.out_root / "cuts" / cut_name / "ensemble" / "winner.json"
         if not winner_path.exists():
             raise SystemExit(f"Missing winner.json for cut '{cut_name}': {winner_path}")
-        winner = json.loads(winner_path.read_text(encoding="utf-8"))["decision"]
+        winner_payload = json.loads(winner_path.read_text(encoding="utf-8"))
+        winner = winner_payload["decision"]
         members = [
             {
                 "backbone": m["backbone"],
@@ -34,11 +35,13 @@ def main():
             }
             for m in winner["members"]
         ]
+        meta_path = winner_payload.get("meta_path")
         cuts_payload[cut_name] = {
-            "kind": "fold_voting",
+            "kind": winner["chosen"],
             "members": members,
             "cv_dir": str((args.out_root / "cuts" / cut_name / "cv").resolve()),
             "ensemble_dir": str((args.out_root / "cuts" / cut_name / "ensemble").resolve()),
+            "meta_path": str(Path(meta_path).resolve()) if meta_path else None,
         }
 
     runtime = {

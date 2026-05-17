@@ -114,6 +114,9 @@ def run_cv_for_cut(
             y_true, y_pred, probs = predict_loader(model, va_loader, device)
             m = binary_metrics(y_true, y_pred, probs)
             dump_json({"fold": fi, **m}, fold_dir / "val_metrics.json")
+            import numpy as _np
+            _np.save(fold_dir / "val_probs.npy", probs)
+            _np.save(fold_dir / "val_y_true.npy", y_true)
             save_confusion_matrix(
                 y_true, y_pred, list(cut.class_names),
                 fold_dir / "confusion_matrix_val.png",

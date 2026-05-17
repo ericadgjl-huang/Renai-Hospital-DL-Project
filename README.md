@@ -1,202 +1,123 @@
-# 仁愛醫院 — 髖關節 X 光 Ficat 4 階段分級
+# 仁愛醫院 Ficat 4 階段 X 光分類
 
-用 5-fold cross-validation + **fold-level soft voting** + 窮舉 5 種 binary
-tree 拓撲的階層式分類管線。每個 cut 直接把 25 個 per-fold 最佳模型
-（5 backbone × 5 fold）做 soft voting 當作集成預測，不再做 final 重訓、
-也不需要在「單模 vs 集成」之間做判斷。
+本專案把髖部 X 光影像分成 Ficat stage 1 到 stage 4。流程分成兩層：
 
----
+1. 先把 4-class 問題拆成 10 個 binary cuts，例如 `12_vs_34`、`3_vs_4`。
+2. 每個 cut 用 5-fold CV 訓練多個 backbone，再用 OOF 表現選出該 cut 的集成方式，最後搜尋 5 種 hierarchy topology。
 
-## 系統架構（v3 — fold-voting）
-
-```
-原始 X 光 ──► YOLOv8 偵測 ROI ──► 統一翻轉成左側 ──►
-   ┌────────────────────────────────────────────────┐
-   │  最佳 binary-tree 拓撲（從 5 種中搜尋而得）       │
-   │   每個 node = 1 個 binary cut（10 種候選之一）    │
-   │   每個 cut  = 5 fold × 5 backbone (25 ckpt) 的    │
-   │              soft-voting 集成                     │
-   └────────────────────────────────────────────────┘
-                          ▼
-                Stage 1 / 2 / 3 / 4
-```
-
-### 為什麼這樣做
-
-| 設計 | 動機 |
-| --- | --- |
-| 5-fold CV bagging | 每個 fold 的 validation-best ckpt 都是「沒看過該 fold val」的模型；soft-vote 25 個降低 variance，等同 cross-validation ensemble |
-| 不再 final 重訓 | 取消 retrain on full 80%，因為 fold 模型本身就是 ensemble member；省下 50 次重訓時間 |
-| 不再「單模 vs 集成」 | fold-voting 永遠是集成結果，沒有要不要集成的判斷 |
-| 5 種拓撲窮舉 | 4 類別的 binary tree 共 5 種（Catalan(3)=5）；窮舉後用 4-class macro-F1 決定贏家 |
-| 固定 seed=42 | 切分、CV folds、初始化、cuDNN 都鎖住 |
-
-### 10 個 binary cuts（5 拓撲共用）
-
-| Cut | left (label 0) | right (label 1) | 哪個拓撲用到 |
-| --- | --- | --- | --- |
-| `1_vs_234`  | {1}     | {2,3,4} | T2, T3 |
-| `12_vs_34`  | {1,2}   | {3,4}   | T1 |
-| `123_vs_4`  | {1,2,3} | {4}     | T4, T5 |
-| `2_vs_34`   | {2}     | {3,4}   | T2 |
-| `23_vs_4`   | {2,3}   | {4}     | T3 |
-| `1_vs_23`   | {1}     | {2,3}   | T4 |
-| `12_vs_3`   | {1,2}   | {3}     | T5 |
-| `2_vs_3`    | {2}     | {3}     | T3, T4 |
-| `1_vs_2`    | {1}     | {2}     | T1, T5 |
-| `3_vs_4`    | {3}     | {4}     | T1, T2 |
-
-### 5 種拓撲
-
-| 拓撲 | 結構 | 需要的 cuts |
-| --- | --- | --- |
-| T1 | `((1,2),(3,4))`     | 12_vs_34, 1_vs_2, 3_vs_4 |
-| T2 | `(1,(2,(3,4)))`     | 1_vs_234, 2_vs_34, 3_vs_4 |
-| T3 | `(1,((2,3),4))`     | 1_vs_234, 23_vs_4, 2_vs_3 |
-| T4 | `((1,(2,3)),4)`     | 123_vs_4, 1_vs_23, 2_vs_3 |
-| T5 | `(((1,2),3),4)`     | 123_vs_4, 12_vs_3, 1_vs_2 |
+目前新版流程是 **OOF-selected fold ensemble**：不再使用 `final/` 重新訓練模型做測試，而是讓選拔和測試都使用同一批 CV fold checkpoints。
 
 ---
 
-## 專案目錄
+## 從 Drive 原始資料到最終輸出
 
-```
-.
-├── configs/                    # YAML configs（base, cuts/*, topologies）
-├── src/renai/                  # 套件
-│   ├── seed.py                 # set_seed(42) 唯一入口
-│   ├── data.py                 # 80/20 split + 5-fold + cut-aware filter
-│   ├── models.py               # 5 個 backbone factory
-│   ├── train.py                # train_one(...) — 一個 (backbone, fold) 的訓練
-│   ├── cv.py                   # 一個 cut 的 5-fold CV（無 final 重訓）
-│   ├── ensemble.py             # 5 fold × 5 backbone = 25 ckpt 的 soft voting
-│   ├── hierarchy.py            # 5 拓撲 + 4-class 推論 + best topology 搜尋
-│   ├── cuts_registry.py        # 10 cuts 註冊
-│   ├── eval.py                 # 指標 / CM / report / json
-│   ├── gradcam.py              # Grad-CAM utility
-│   └── cli/                    # CLI entry points
-├── scripts/                    # 一鍵腳本
-│   ├── 00_make_dataset.py
-│   ├── 03_train_cv.py
-│   ├── 04_train_all_cuts.py
-│   ├── 05_build_ensemble.py
-│   ├── 06_search_hierarchy.py
-│   └── 07_update_web.py
-├── outputs/
-│   ├── splits/outer_split.json
-│   ├── cuts/<cut>/
-│   │   ├── cv/fold_{0..4}/<backbone>/best_<backbone>.pth   # 25 ckpts/cut
-│   │   ├── cv/fold_{0..4}/<backbone>/val_metrics.json
-│   │   ├── summary.csv                                     # CV 指標
-│   │   ├── cv_per_fold.csv
-│   │   └── ensemble/
-│   │       ├── winner.json                                 # 25 members 與 test 指標
-│   │       ├── test_probs.npy
-│   │       ├── confusion_matrix_test.png
-│   │       └── classification_report_test.txt
-│   └── hierarchy/
-│       ├── search_results.csv
-│       ├── best_topology.json
-│       └── T1/, T2/, ...
-├── stage_cls_dataset/          # ImageFolder（既有，stage_1..stage_4）
-└── web_app/
-    ├── app.py                  # Flask app（讀 _runtime.json）
-    └── _runtime.json           # 由 07_update_web.py 自動產生
+以下指令假設你在專案根目錄執行，也就是有：
+
+```text
+drive-download-20251023T113302Z-1-001/
+  Ficat stage 1/
+  Ficat stage 2/
+  Ficat stage 3/
+  Ficat stage 4/
+weights/yolo_best.pt
 ```
 
----
-
-## 環境
+### 0. 建立環境
 
 ```powershell
-conda activate unet_labeling
-# 或第一次安裝：
 conda env create -f environment.yaml
-```
-
-可選：把套件 editable 安裝：
-
-```powershell
+conda activate unet_labeling
 pip install -e .
 ```
 
----
-
-## 完整訓練流水線
-
-> 全程在工作目錄根部下指令；固定 `seed=42`。
-
-### Step 0 — 從 YOLO ROI 建 ImageFolder（歷史紀錄、目前可跳過）
-
-`stage_cls_dataset/` 已經在 repo 中存在並被 v3 pipeline 直接使用。
-`scripts/00_make_dataset.py` 仍保留原本的「YOLO crop + L/R 翻轉 + 寫成
-ImageFolder」邏輯做為紀錄；它需要 git-ignored 的中間資料夾
-`yolo_dataset_process/yolo_dataset/images/`，目前 checkout 不含此資料夾，
-因此腳本會偵測到並印出 `[skip] ...` 後乾淨退出 — **預期行為**，不是錯誤。
+如果環境已經建好，只需要：
 
 ```powershell
-# 想再生 stage_cls_dataset 才需要跑（必須先有 yolo_dataset_process/）
-python scripts/00_make_dataset.py
+conda activate unet_labeling
+pip install -e .
 ```
 
-### Step 1 — 對單一 cut 跑 5-fold CV（先驗證流程）
+### 1. 從 Drive 原圖產生分類資料集
+
+這一步會用 YOLO 找 ROI，裁切後把右側影像翻成左側方向，輸出：
+
+```text
+stage_cls_dataset/stage_1..stage_4/
+roi_all.csv
+```
+
+如果 `stage_cls_dataset/` 已經存在且你不想重做，可以跳過這步。
 
 ```powershell
-python scripts/03_train_cv.py --cut 1_vs_234
-# Smoke test（1 fold × 2 epoch × 1 backbone）：
-python scripts/03_train_cv.py --cut 3_vs_4 --backbones efficientnet_b0 --smoke
+python scripts/01_prepare_stage_dataset.py `
+  --raw-root drive-download-20251023T113302Z-1-001 `
+  --weights weights/yolo_best.pt `
+  --out stage_cls_dataset `
+  --roi-csv roi_all.csv `
+  --device 0 `
+  --overwrite
 ```
 
-每個 (backbone, fold) 都會留下 validation-best ckpt：
+若沒有 GPU，把 `--device 0` 改成：
 
-```
-outputs/cuts/<cut>/cv/fold_0/<backbone>/best_<backbone>.pth
-                              val_metrics.json
-                              confusion_matrix_val.png
-                              classification_report_val.txt
-outputs/cuts/<cut>/cv/fold_1/...
-outputs/cuts/<cut>/summary.csv         # CV mean/std per backbone
-outputs/cuts/<cut>/cv_per_fold.csv     # 逐 fold 詳細結果
+```powershell
+--device cpu
 ```
 
-### Step 2 — 跑完所有 10 個 cuts
+### 2. 訓練全部 binary cuts
+
+這一步很久，會訓練：
+
+```text
+10 cuts x 5 folds x 5 backbones = 250 個 fold checkpoints
+```
 
 ```powershell
 python scripts/04_train_all_cuts.py
-# 只跑指定的：
-python scripts/04_train_all_cuts.py --only 1_vs_234 2_vs_3
 ```
 
-5 backbone × 5 fold × 10 cut = 250 次訓練；視 GPU 可能要數小時。
+輸出位置：
 
-### Step 3 — 對每個 cut 做 25-model soft voting
+```text
+outputs/cuts/<cut>/cv/fold_0/<backbone>/best_<backbone>.pth
+outputs/cuts/<cut>/cv/fold_1/<backbone>/best_<backbone>.pth
+...
+outputs/cuts/<cut>/summary.csv
+outputs/cuts/<cut>/cv_per_fold.csv
+```
+
+如果你只是測試流程，可以先跑 smoke test：
+
+```powershell
+python scripts/03_train_cv.py --cut 3_vs_4 --backbones efficientnet_b0 --smoke
+```
+
+### 3. 建立 OOF ensemble
+
+如果你已經訓練過 CV checkpoints，這一步可以直接跑，不需要重跑 Step 2。
 
 ```powershell
 python scripts/05_build_ensemble.py
 ```
 
-每個 cut 都會寫出 `outputs/cuts/<cut>/ensemble/winner.json`：
+每個 cut 會輸出：
 
-```json
-{
-  "decision": {
-    "cut": "1_vs_234",
-    "chosen": "fold_voting",
-    "members": [
-      {"backbone": "efficientnet_b0", "fold": 0, "ckpt": "outputs/cuts/.../best_efficientnet_b0.pth"},
-      ...
-    ],
-    "test_macro_f1": 0.84,
-    "test_accuracy": 0.85,
-    "test_auc": 0.91
-  },
-  "n_members": 25
-}
+```text
+outputs/cuts/<cut>/ensemble/winner.json
+outputs/cuts/<cut>/ensemble/test_probs.npy
+outputs/cuts/<cut>/ensemble/confusion_matrix_test.png
+outputs/cuts/<cut>/ensemble/classification_report_test.txt
 ```
 
-`outputs/ensemble_summary.csv` 會匯總每個 cut 的 test 指標。
+總表：
 
-### Step 4 — 5 種拓撲窮舉，挑最佳 4-class macro-F1
+```text
+outputs/ensemble_summary.csv
+```
+
+如果 `val_probs.npy` 不存在也沒關係，`ensemble.py` 會載入 fold checkpoints 重新 inference validation fold，只是第一次會比較久。
+
+### 4. 搜尋最佳 hierarchy topology
 
 ```powershell
 python scripts/06_search_hierarchy.py
@@ -204,65 +125,288 @@ python scripts/06_search_hierarchy.py
 
 輸出：
 
-```
-outputs/hierarchy/
-├── search_results.csv
-├── best_topology.json
-├── best_topology.yaml
-└── T1/, T2/, ...
+```text
+outputs/hierarchy/search_results.csv
+outputs/hierarchy/best_topology.json
+outputs/hierarchy/best_topology.yaml
+outputs/hierarchy/T1..T5/
 ```
 
-### Step 5 — 同步到 web_app
+### 5. 同步 Web App runtime
 
 ```powershell
 python scripts/07_update_web.py
 ```
 
-之後 `python web_app/app.py` 啟動時讀 `_runtime.json` 自動建路由；
-每個 cut 都會在 cpu 上同時載入 ≤25 個 ckpt 做 soft voting。
+這會產生：
 
----
-
-## 重要設計細節
-
-* **固定 seed=42 全程一致**。`src/renai/seed.py` 是唯一 seed 入口；
-  CV 折之間用 `SEED+fold_index` 讓不同 fold 的 RNG 不同步但仍可重現。
-* **outer split 一次寫死**：`outputs/splits/outer_split.json` 第一次跑時計算
-  並快取。後續每個 cut、每次 ensemble、hierarchy 搜尋都讀同一份。
-* **Cut-aware sample filtering**：`2_vs_3` / `1_vs_2` 訓練時只看自己範圍內
-  的 stage（不看 stage 1/4）；hierarchy 推論時若上層 cut 把 stage 1 樣本
-  誤送進 `2_vs_3`，那是階層錯誤，不是訓練錯誤。
-* **Soft voting 永遠是集成結果**：不再有「單模 vs 集成」的選擇；
-  fold-voting 直接出最終 test 指標。
-
----
-
-## 快速 sanity check
-
-```powershell
-python scripts/03_train_cv.py --cut 3_vs_4 --backbones efficientnet_b0 --smoke
+```text
+web_app/_runtime.json
 ```
 
-通過後再跑完整流程（Step 2 ~ 5）。
-
----
-
-## Web 部署（保留 Render 流程）
-
-`requirements-render.txt` / `runtime.txt` / `web_app/app.py` 仍可用 Render
-部署。雲端版讀同一份 `_runtime.json`；25 ckpt 透過 `MODEL_ASSET_BASE_URL`
-拉取（沿用原本的下載機制）。
-
----
-
-## Git
+### 6. 啟動 Web App
 
 ```powershell
-git status
-git add <files>
-git commit -m "<msg>"
-git push
+python web_app/app.py
 ```
 
-> ⚠️ 別把 `outputs/`、`stage_cls_dataset/`、`*.pth` push 上去 — 跟原本一樣
-> 透過 GitHub Releases 或 R2/S3 分發權重。
+預設網址：
+
+```text
+http://127.0.0.1:5000
+```
+
+如果你已經開著 Flask，跑完 `07_update_web.py` 後要重啟 Flask，才會吃到新的 `_runtime.json`。
+
+---
+
+## 如果只想從既有 checkpoints 重建最終結果
+
+當 `outputs/cuts/<cut>/cv/fold_*/<backbone>/best_<backbone>.pth` 已經存在時，不需要再跑 `04_train_all_cuts.py`。
+
+可以先清掉舊 ensemble/hierarchy 結果：
+
+```cmd
+for /D %i in (outputs\cuts\*) do @if exist "%i\ensemble" rmdir /S /Q "%i\ensemble"
+if exist outputs\hierarchy rmdir /S /Q outputs\hierarchy
+if exist outputs\ensemble_summary.csv del /F /Q outputs\ensemble_summary.csv
+```
+
+然後直接跑：
+
+```powershell
+python scripts/05_build_ensemble.py
+python scripts/06_search_hierarchy.py
+python scripts/07_update_web.py
+```
+
+---
+
+## 模型選拔與集成流程
+
+### 1. 為什麼要拆成 binary cuts
+
+Ficat stage 有 4 類。這個專案不是直接訓練一個 4-class classifier，而是把問題拆成多個二元問題：
+
+| Cut | label 0 | label 1 |
+| --- | --- | --- |
+| `1_vs_234` | stage 1 | stage 2,3,4 |
+| `12_vs_34` | stage 1,2 | stage 3,4 |
+| `123_vs_4` | stage 1,2,3 | stage 4 |
+| `2_vs_34` | stage 2 | stage 3,4 |
+| `23_vs_4` | stage 2,3 | stage 4 |
+| `1_vs_23` | stage 1 | stage 2,3 |
+| `12_vs_3` | stage 1,2 | stage 3 |
+| `2_vs_3` | stage 2 | stage 3 |
+| `1_vs_2` | stage 1 | stage 2 |
+| `3_vs_4` | stage 3 | stage 4 |
+
+每個 hierarchy topology 會用其中 3 個 cuts 把樣本一路分到 stage 1、2、3、4。
+
+### 2. 每個 cut 怎麼訓練
+
+對每個 cut，程式會在 train_val 資料上做 5-fold CV。
+
+每個 fold 會訓練 5 個 backbone：
+
+```text
+efficientnet_b0
+efficientnet_b1
+resnet50
+convnext_tiny
+convnext_small
+```
+
+所以每個 cut 會得到：
+
+```text
+5 folds x 5 backbones = 25 個 checkpoints
+```
+
+但實際**集成只取每個 fold 的 validation 最佳 backbone**，所以 ensemble 階段只會用：
+
+```text
+5 folds x 1 best backbone = 5 個 checkpoints
+```
+
+例如 `12_vs_34` 訓練後可能是：
+
+```text
+outputs/cuts/12_vs_34/cv/fold_0/<5 個 backbone>/best_*.pth
+outputs/cuts/12_vs_34/cv/fold_1/<5 個 backbone>/best_*.pth
+...
+```
+
+`ensemble.py` 會讀每個 fold 的 `val_metrics.json`，找出該 fold macro-F1 最高的 backbone，最終 5 個 fold 各拿 1 個，例如：
+
+```text
+fold 0: best=convnext_small  val_macro_f1=0.85
+fold 1: best=efficientnet_b1 val_macro_f1=0.83
+fold 2: best=convnext_small  val_macro_f1=0.86
+fold 3: best=resnet50        val_macro_f1=0.81
+fold 4: best=convnext_tiny   val_macro_f1=0.84
+```
+
+### 3. OOF 是什麼
+
+OOF 是 out-of-fold prediction。
+
+假設某張 train_val 影像在 fold 2 的 validation set 裡，那它的 OOF 預測只能由 fold 2 的模型產生。因為 fold 2 的模型訓練時沒有看過這張影像，所以這個預測比較接近「沒看過資料」時的表現。
+
+這是新版流程的核心：**用 OOF 表現做選拔，不用 test set 做選拔。**
+
+### 4. 每個 cut 會比較兩種集成方式
+
+`scripts/05_build_ensemble.py` 會對每個 cut 比較：
+
+兩種策略都只用 5 個 fold-winner ckpts，不會用到其他 20 個。
+
+#### fold_voting
+
+OOF 階段：
+
+```text
+每個樣本 s ∈ V_k 的 OOF prediction = fold k 的 best backbone 的 softmax(s)
+（這個 model 訓練時沒看過 s，所以是 unbiased）
+```
+
+Test 階段：
+
+```text
+5 個 fold-winner 的 softmax 平均，再 argmax
+```
+
+#### stacking
+
+OOF 階段：
+
+```text
+X_oof = 每個樣本 ∈ V_k 由 fold k 的 best backbone softmax 構成
+shape = (N_trainval, 2)
+```
+
+再用：
+
+```text
+LogisticRegression(class_weight="balanced")
+```
+
+做 meta classifier。OOF 分數不是直接 fit 後評估，而是用：
+
+```text
+cross_val_predict(LogReg, X_oof, y_oof, cv=5)
+```
+
+這樣 voting 和 stacking 都是在同一批 OOF 預測上公平比較。
+
+> 註：因為只有 5 個 model + 2-dim softmax，stacking 本質上等同 LR 校正過的閾值調整；多數情況下不會比 voting 強，但兩個 OOF 分數都會記錄在 `winner.json` 供事後檢查。
+
+Test 階段：
+
+```text
+5 個 fold-winner 的 softmax 平均 → 餵給已重新 fit (使用全 X_oof) 的 meta → predict_proba
+```
+
+### 5. winner 怎麼決定
+
+每個 cut 都只看 OOF macro-F1：
+
+```text
+如果 stacking OOF macro-F1 > voting OOF macro-F1
+    chosen = stacking
+否則
+    chosen = fold_voting
+```
+
+結果寫在：
+
+```text
+outputs/cuts/<cut>/ensemble/winner.json
+```
+
+重要的是：`test_macro_f1` 只是報告用，不參與選拔。
+
+### 6. 為什麼新版不再用 final retrain model
+
+舊問題是：
+
+```text
+OOF 選拔依據：5 個 CV fold models
+最後 test 使用：final/ 重新用完整 train_val 訓練的另一個 model
+```
+
+這會造成「選拔用的模型」和「上場考 test 的模型」不是同一種模型定義。
+
+新版已改成：
+
+```text
+OOF 選拔依據：5 個 fold-winner CV checkpoints
+最後 test 使用：同一批 5 個 fold-winner ckpts 的 ensemble
+```
+
+所以 selection 和 final evaluation 一致。
+
+### 7. hierarchy topology 怎麼選
+
+4 個 stage 的有序 binary tree 共有 5 種：
+
+| Topology | 結構 | 使用 cuts |
+| --- | --- | --- |
+| T1 | `((1,2),(3,4))` | `12_vs_34`, `1_vs_2`, `3_vs_4` |
+| T2 | `(1,(2,(3,4)))` | `1_vs_234`, `2_vs_34`, `3_vs_4` |
+| T3 | `(1,((2,3),4))` | `1_vs_234`, `23_vs_4`, `2_vs_3` |
+| T4 | `((1,(2,3)),4)` | `123_vs_4`, `1_vs_23`, `2_vs_3` |
+| T5 | `(((1,2),3),4)` | `123_vs_4`, `12_vs_3`, `1_vs_2` |
+
+`scripts/06_search_hierarchy.py` 會對 5 種 topology 都跑 outer test set，計算 4-class macro-F1，選最高者寫入：
+
+```text
+outputs/hierarchy/best_topology.json
+```
+
+### 8. Web App 用的是什麼
+
+`scripts/07_update_web.py` 會把最佳 topology 和各 cut 的 winner 寫到：
+
+```text
+web_app/_runtime.json
+```
+
+Web App 啟動時會載入：
+
+```text
+weights/yolo_best.pt
+web_app/_runtime.json
+outputs/cuts/<cut>/cv/fold_*/<backbone>/best_<backbone>.pth
+```
+
+上傳影像後流程是：
+
+```text
+原始 X 光
+  -> YOLO 裁 ROI
+  -> 若是右側則水平翻轉
+  -> 依最佳 topology 跑 3 個 binary cuts
+  -> 輸出 Stage 1/2/3/4 與 Grad-CAM
+```
+
+---
+
+## 主要輸出檔
+
+```text
+outputs/ensemble_summary.csv
+outputs/cuts/<cut>/ensemble/winner.json
+outputs/hierarchy/search_results.csv
+outputs/hierarchy/best_topology.json
+web_app/_runtime.json
+```
+
+---
+
+## 注意事項
+
+- `outputs/`、`stage_cls_dataset/`、`*.pth` 通常不要 push 到 Git。
+- `outputs/splits/outer_split.json` 會固定 outer 80/20 split，重跑時會沿用同一份 split。
+- 如果要完全重做實驗，才需要刪掉 `outputs/` 後從 Step 1 或 Step 2 開始。
+- 如果只是重建 ensemble/hierarchy，保留 `outputs/cuts/*/cv/`，從 `05_build_ensemble.py` 開始即可。

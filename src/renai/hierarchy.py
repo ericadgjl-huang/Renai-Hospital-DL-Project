@@ -22,6 +22,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 import torch
@@ -94,8 +95,12 @@ TOPOLOGIES: dict[str, Topology] = {
 # ----- Per-cut fold-voting predictor ----------------------------------------
 
 class CutPredictor:
-    """Soft-vote of every per-fold best ckpt that ensemble step found for
-    this cut.  Members are read from outputs/cuts/<cut>/ensemble/winner.json."""
+    """Per-cut inference using the 5 best-per-fold ckpts.
+
+    Reads outputs/cuts/<cut>/ensemble/winner.json:
+      - chosen == "fold_voting" -> mean softmax over the 5 fold-winners.
+      - chosen == "stacking"    -> same mean softmax fed to a LR meta.
+    """
 
     def __init__(self, cut_dir: Path, device: str):
         self.cut_dir = cut_dir
@@ -105,33 +110,50 @@ class CutPredictor:
         if not winner_path.exists():
             raise FileNotFoundError(f"Missing winner.json at {winner_path}")
         info = json.loads(winner_path.read_text(encoding="utf-8"))
-        self.members: list[dict] = list(info["decision"]["members"])
+        decision = info["decision"]
+        self.kind: str = decision["chosen"]
+        self.members: list[dict] = list(decision["members"])
 
-        print(f"  [load] {cut_dir.name}: loading {len(self.members)} ckpts on {device}", flush=True)
+        print(
+            f"  [load] {cut_dir.name}: kind={self.kind} "
+            f"members={len(self.members)} on {device}",
+            flush=True,
+        )
+
         self._models: list[tuple[str, torch.nn.Module]] = []
         for k, entry in enumerate(self.members, 1):
             bb = entry["backbone"]
-            ckpt = Path(entry["ckpt"])
             m = create_model(bb, num_classes=2).to(device)
-            m.load_state_dict(torch.load(ckpt, map_location=device))
+            m.load_state_dict(torch.load(entry["ckpt"], map_location=device))
             m.eval()
             self._models.append((bb, m))
-            if k % 5 == 0 or k == len(self.members):
-                print(f"    .. {k}/{len(self.members)} loaded", flush=True)
+            print(
+                f"    .. fold {entry['fold']} bb={bb} loaded ({k}/{len(self.members)})",
+                flush=True,
+            )
+
+        self._meta = None
+        if self.kind == "stacking":
+            meta_path = info.get("meta_path") or str(cut_dir / "ensemble" / "meta_logreg.pkl")
+            self._meta = joblib.load(meta_path)
 
     @torch.no_grad()
     def prob_class1(self, x: torch.Tensor) -> np.ndarray:
-        """Mean P(class=1) across members for every sample in `x`."""
+        """Per-sample P(class=1) under the chosen strategy."""
+        x = x.to(self.device)
+
         sums: np.ndarray | None = None
-        for _, m in self._models:
-            p = F.softmax(m(x.to(self.device)), dim=1).cpu().numpy()
-            if sums is None:
-                sums = np.zeros_like(p)
-            sums += p
+        for _bb, m in self._models:
+            p = F.softmax(m(x), dim=1).cpu().numpy()
+            sums = p if sums is None else sums + p
         if sums is None:
             return np.array([])
-        avg = sums / float(len(self._models))
-        return avg[:, 1]
+        avg_softmax = sums / float(len(self._models))   # (N, 2)
+
+        if self.kind == "stacking" and self._meta is not None:
+            return self._meta.predict_proba(avg_softmax)[:, 1]
+
+        return avg_softmax[:, 1]
 
 
 # ----- Hierarchy inference --------------------------------------------------
