@@ -1,65 +1,158 @@
-# 開發完成：髖關節嚴重程度預測分類網頁
+# Web App Walkthrough
 
-本開發已完成使用者指定的網頁應用設計，並且完全放置在一個獨立的專案資料夾內，不會影響原始外部程式的運行與結構。
+這份文件說明目前 `web_app/` 的用途、啟動方式，以及它如何使用訓練流程產生的最佳 hierarchy 模型。
 
-## 推論與熱力圖方向處理機制
+## 目前版本重點
 
-為確保模型推論準確度不受左右側骨頭方向不同的干擾，本系統實作了嚴謹的方向校正邏輯：
-* **處理「左側 (L)」影像時**：由於 YOLO 裁出來的影像已經是原始的左側骨頭，因此直接送入 `m1`, `m2`, `m3` 神經網路進行推論（不做任何翻轉）。產生的 Grad-CAM 熱力圖也會自然對齊原圖。
-* **處理「右側 (R)」影像時**：在準備進入神經網路「推論的瞬間」，程式碼會自動執行 `cropped_img.transpose(Image.FLIP_LEFT_RIGHT)`，將右骨影像強制水平鏡像翻轉成與訓練集一致的「左側基準」方向。當各模型計算完畢、匯出熱力圖特徵後，在產生最終疊圖的 `generate_overlay_base64` 函數中，系統會利用 `np.fliplr(gcam_map)` 再把熱力圖「鏡像轉回來」，最後精準覆蓋在畫面上原始方向的右髖部裁切原圖上。
-  * **總結**：畫面上給使用者觀看時，方向與原本 X 光片完全一致；但在底層交給 AI 推論時，影像空間會被統一拉齊，徹底排除方向干擾，兼顧了「準確度」與「人眼直覺」。
+目前 web app 不再寫死舊版的 `m1 / m2 / m3` 模型組合。它會讀取：
 
+```text
+web_app/_runtime.json
+```
 
-## 修改與新增項目
+這個檔案由下面指令產生：
 
-- **[NEW] `web_app/` 資料夾**:
-  - 用於隔離網頁程式與模型載入代碼，保持專案整潔。
-- **[NEW] `web_app/app.py`**:
-  - Flask 背景伺服器程式碼。
-  - 使用 `02_yolo_infer_make_ROI.ipynb` 相同的邏輯進行 YOLO 髖部裁切（左 L 則取 `x2` 最大者，右 R 取 `x1` 最小者）。
-  - 使用 `03.5_stage_classifier_combinationV9.ipynb` 相同的決策樹與模型組合架構：
-    - m1 (DenseNet121): 判別 Stage 4。
-    - m2 (多模型 Stacking): 判別 Stage 1。
-    - m3 (DenseNet121): 判別 Stage 3 vs Stage 2。
-  - 以 JSON API 的形式回傳裁切後的預覽圖（Base64編碼）、最終分類階段及各模型信心水準。
-- **[NEW] `web_app/templates/index.html`**:
-  - 現代化且動態互動的網頁前端（基於 Tailwind CSS 設計）。
-  - 提供影像選擇與上傳、左/右判定勾選。
-  - 於左側提交後，右側會顯示：
-    1. **「YOLO 裁切目標區域」** (移至左下角)
-    2. **「AI 關注區域 (Grad-CAM 熱力圖)」** (包含 m1, m2, m3 三個獨立模型的熱力圖並排顯示)
-    3. **「最終判定分類 (第 1-4 類)」**
-    4. **「各類綜合判定機率排名」**（將三階段模型機率合併計算出各類別最終機率，並由高至低自動排序）。
-       * ※ **機率換算圖解邏輯：**
-         * 模型 `m1` 判定是第 4 類的機率為 `P(Stage4)`。因此不是第 4 類的機率為 `P(Not_4) = 1 - P(Stage4)`
-         * 模型 `m2` 判定是第 1 類的機率為 `P(Stage1_nodal)`。因此不是第 1 類的機率為 `1 - P(Stage1_nodal)`
-         * 模型 `m3` 判定是第 3 類的機率為 `P(Stage3_nodal)`。因此不是第 3 類的機率為 `1 - P(Stage3_nodal)`
-       * 故網頁最終呈現的四類絕對機率為：
-         * **第 4 類機率** = `P(Stage4)`
-         * **第 1 類機率** = `P(Not_4) × P(Stage1_nodal)`
-         * **第 3 類機率** = `P(Not_4) × (1 - P(Stage1_nodal)) × P(Stage3_nodal)`
-         * **第 2 類機率** = `P(Not_4) × (1 - P(Stage1_nodal)) × (1 - P(Stage3_nodal))`
+```cmd
+python scripts\07_update_web.py --out-root outputs
+```
 
-## 如何在本地執行
+`_runtime.json` 會記錄：
 
-1. 打開終端機或命令提示字元 (Command Prompt/PowerShell)。
-2. 進入到剛剛新增的 `web_app` 資料夾：
-   ```bash
-   cd  /d "D:\中興大學\碩一上\仁愛醫院\仁愛醫院調整8總整理\web_app"
-   ```
-3. 執行 Flask 伺服器：
-   ```bash
-   python app.py
-   ```
-   *注意：會先在主控台印出 `Loading Models...`，需要稍待幾秒鐘直到模型載入完成（出現 `Models Initialized Successfully!`）*
-4. 在瀏覽器打開以下網址：
-   [http://127.0.0.1:5000](http://127.0.0.1:5000)
-5. 在美觀的圖形介面中上傳影像，選擇左右側後進行分析。
+- 最佳 hierarchy topology，例如 `T1 ((1,2),(3,4))`
+- 勝出 topology 需要用到哪些 binary cuts
+- 每個 cut 最後選到 `single`、`voting` 或 `stacking`
+- 每個 cut 對應的 final model 權重位置
+- 若該 cut 使用 stacking，會記錄 `meta_logreg.pkl` 位置
 
-## 視覺化設計特色
-1. **動態載入**：在伺服器計算裁切與神經網路推論時，會有明確的「載入中 (Loading...)」設計提示。
-2. **錯誤處理**：如果 YOLO 模型抓不到髖關節、沒有預測框，會以明確紅字回覆錯誤原因，確保程式不會輕易當機。
-3. **優美與響應性**：使用了毛玻璃背景特效 (Glassmorphism)，配合圓角框與柔和字體，視覺體驗佳。
+所以只要重新訓練、重新 build ensemble、重新 search hierarchy，再跑一次 `07_update_web.py`，web app 就會改用最新模型設定。
 
-如有需要調整信心閾值 (Threshold)，亦可直接於 `app.py` 中的 `thr2_val` 或 Node 判斷內進行微調。
+## 啟動前檢查
 
+請確認以下檔案存在：
+
+```text
+outputs/hierarchy/best_topology.json
+web_app/_runtime.json
+weights/yolo_best.pt
+```
+
+如果 `web_app/_runtime.json` 不存在，先執行：
+
+```cmd
+python scripts\07_update_web.py --out-root outputs
+```
+
+如果 `weights/yolo_best.pt` 不存在，app 會退回使用：
+
+```text
+weights/yolov8n.pt
+```
+
+但正式使用建議放入專案訓練好的 `yolo_best.pt`。
+
+## 啟動方式
+
+在專案根目錄執行：
+
+```cmd
+conda activate unet_labeling
+python web_app\app.py
+```
+
+接著開啟：
+
+```text
+http://127.0.0.1:5000
+```
+
+## 使用流程
+
+1. 上傳 X 光影像。
+2. 選擇要分析的側別：左側 `L` 或右側 `R`。
+3. App 使用 YOLO 偵測 ROI。
+4. 若選擇右側 `R`，ROI 會水平翻轉，讓分類模型統一看成左側方向。
+5. App 將 ROI 丟入目前最佳 hierarchy。
+6. 頁面會顯示：
+   - YOLO 偵測框影像
+   - 裁切後的 ROI
+   - 最終預測 stage
+   - stage 1 到 stage 4 的機率
+   - 每個 hierarchy cut 的 Grad-CAM overlay
+
+## 推論流程
+
+推論時的流程如下：
+
+```text
+上傳影像
+  |
+  v
+YOLO 偵測 ROI
+  |
+  v
+依 L/R 統一方向
+  |
+  v
+讀取 _runtime.json 指定的最佳 topology
+  |
+  v
+依 topology 的 rules 逐個 cut 取得 P(label 1)
+  |
+  v
+把每條路徑的條件機率相乘，得到 stage 1..4 機率
+  |
+  v
+選機率最高者作為最終 stage
+```
+
+每個 cut 的預測方式會依 `winner.json` 決定：
+
+| Winner | Web app 推論方式 |
+| --- | --- |
+| `single` | 載入單一 final backbone |
+| `voting` | 載入多個 final backbones，平均 softmax probability |
+| `stacking` | 載入多個 final backbones，將 probability 串接後交給 LogisticRegression meta model |
+
+## L/R 方向處理
+
+訓練資料在建立 `stage_cls_dataset/` 時，會把右側 ROI 翻成左側方向。Web app 推論時也維持同樣規則：
+
+- 使用者選 `L`：直接使用裁切 ROI。
+- 使用者選 `R`：先水平翻轉 ROI，再送進分類模型。
+
+Grad-CAM 顯示時會再對右側 overlay 做相對應處理，讓畫面位置和原始 ROI 對得起來。
+
+## Grad-CAM 說明
+
+每個 cut 會產生一張 Grad-CAM。若該 cut 是 `voting` 或 `stacking`，目前 app 會使用該 cut 的第一個 member backbone 產生 Grad-CAM，作為可視化參考。
+
+Grad-CAM 用來輔助觀察模型關注區域，不等於模型唯一判斷依據。
+
+## 常見問題
+
+### `/predict` 回傳 models not initialized
+
+通常是 `web_app/_runtime.json` 不存在，或裡面指向的模型權重不存在。請先跑：
+
+```cmd
+python scripts\07_update_web.py --out-root outputs
+```
+
+並確認 `outputs/cuts/<cut>/final/<backbone>/best_<backbone>.pth` 存在。
+
+### YOLO 找不到 ROI
+
+可能是影像品質、方向、裁切範圍或 confidence threshold 造成。現在 app 使用：
+
+```text
+conf=0.25
+imgsz=640
+```
+
+若常常偵測不到，可以到 `web_app/app.py` 調整 `yolo_model.predict(...)` 的 `conf`。
+
+### 預測結果和 OOF 選擇落差很大
+
+目前 web app 和 hierarchy test 都使用 `final/` 重新訓練後的模型權重。OOF 選擇則是根據 CV fold models。這兩者不是同一批權重，因此 OOF 排名和 final model 實際表現可能不完全一致。
+
+這是目前訓練流程中最需要注意的地方。
