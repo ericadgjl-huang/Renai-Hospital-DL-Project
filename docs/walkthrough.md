@@ -169,8 +169,10 @@ http://127.0.0.1:5000
 | `Models not initialized` | `_runtime.json` 不存在 → 先跑 `run_all.bat` |
 | 改了模型但網頁沒變 | Flask 要重啟才會重讀 `_runtime.json` |
 
-> 注意：demo 網頁用的是 **hierarchy（硬路由）** topology。`09_train_combiner.py` 算出的學習型
-> combiner 目前只在離線報表比較，尚未接到網頁。若要讓網頁改用 combiner，需另外擴充 `app.py`。
+> 注意：若 `_runtime.json` 內有 combiner 區塊（`07_update_web.py` 會在 `outputs/combiner/topology3/`
+> 有模型時自動寫入），demo 網頁的**最終 Stage 會改用學習型 combiner**（取代硬路由），啟動時會印
+> `[boot] combiner = topology3 / <model>`。沒有 combiner 時則自動退回 hierarchy 硬路由。
+> Grad-CAM 仍是各 cut 各自產生。重訓 (`run_all.bat train`) 後 combiner 會用新模型重建並自動接上。
 
 ---
 

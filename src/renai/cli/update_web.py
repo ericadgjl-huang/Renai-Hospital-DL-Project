@@ -49,6 +49,26 @@ def main():
         "cuts": cuts_payload,
         "out_root": str(args.out_root.resolve()),
     }
+
+    # Optional: learned combiner head. Prefer 'topology3' because it uses exactly
+    # the topology's 3 cuts (already loaded by the web app). Only wire it in if
+    # its model file exists and its cuts are a subset of the loaded cuts.
+    combiner_best = args.out_root / "combiner" / "topology3" / "best.json"
+    if combiner_best.exists():
+        cb = json.loads(combiner_best.read_text(encoding="utf-8"))
+        model_path = cb.get("model_path")
+        cb_cuts = list(cb.get("cuts_used", []))
+        if model_path and Path(model_path).exists() and set(cb_cuts).issubset(cuts_payload):
+            runtime["combiner"] = {
+                "featureset": cb.get("featureset", "topology3"),
+                "best_model": cb.get("best_model"),
+                "model_path": str(Path(model_path).resolve()),
+                "cuts": cb_cuts,  # feature column order
+            }
+            print(f"   combiner: {cb.get('featureset')} / {cb.get('best_model')} (cuts={cb_cuts})")
+        else:
+            print(f"   combiner: skipped (missing model or cuts not subset of {sorted(cuts_payload)})")
+
     runtime_path = args.web_app / "_runtime.json"
     runtime_path.parent.mkdir(parents=True, exist_ok=True)
     runtime_path.write_text(json.dumps(runtime, indent=2, ensure_ascii=False), encoding="utf-8")

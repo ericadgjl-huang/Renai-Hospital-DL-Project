@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
@@ -150,6 +151,10 @@ def run_combiner(
     rows.sort(key=lambda r: r["oof_macro_f1"], reverse=True)
     best_name = rows[0]["model"]
     best_model = candidate_models(seed)[best_name]
+    # SVC has no predict_proba unless probability=True; the web needs per-stage
+    # probabilities, so enable it for the persisted SVM model.
+    if best_name.startswith("svm"):
+        best_model.set_params(probability=True)
     best_model.fit(X_oof, y_tv)
     y_pred = best_model.predict(X_test)
 
@@ -159,6 +164,9 @@ def run_combiner(
 
     comb_dir = out_root / "combiner" / featureset
     comb_dir.mkdir(parents=True, exist_ok=True)
+    # Persist the fitted model + feature (cut) order so the web app can load it.
+    model_path = comb_dir / "combiner_model.joblib"
+    joblib.dump({"model": best_model, "cuts": used, "classes": [int(c) for c in best_model.classes_]}, model_path)
     pd.DataFrame(rows).to_csv(comb_dir / "model_selection.csv", index=False, encoding="utf-8-sig")
     save_confusion_matrix(
         y_test - 1, y_pred - 1, STAGE_NAMES,
@@ -173,6 +181,7 @@ def run_combiner(
         "cuts_used": used,
         "n_features": len(used),
         "best_model": best_name,
+        "model_path": str(model_path.resolve()),
         "oof_macro_f1": rows[0]["oof_macro_f1"],
         "test_macro_f1": m["macro_f1"],
         "test_accuracy": m["accuracy"],

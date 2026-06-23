@@ -119,6 +119,25 @@ class HierarchyRouter:
             cn: CutPredictor(cn, info) for cn, info in runtime["cuts"].items()
         }
 
+        # Optional learned combiner head (idea #4): replaces hard routing with a
+        # classifier over the cut probabilities. Falls back to routing if absent.
+        self.combiner = None
+        self.combiner_cuts: list[str] = []
+        self.combiner_name = None
+        self.combiner_featureset = None
+        cb = runtime.get("combiner")
+        if cb and Path(cb.get("model_path", "")).exists():
+            bundle = joblib.load(cb["model_path"])
+            self.combiner = bundle["model"]
+            self.combiner_cuts = cb.get("cuts") or bundle.get("cuts", [])
+            self.combiner_name = cb.get("best_model")
+            self.combiner_featureset = cb.get("featureset")
+            print(
+                f"[boot] combiner = {self.combiner_featureset} / {self.combiner_name} "
+                f"cuts={self.combiner_cuts}",
+                flush=True,
+            )
+
     def predict(self, x: torch.Tensor) -> dict:
         rules = list(self.topology["rules"])
         per_stage_prob: dict[int, float] = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
@@ -143,15 +162,30 @@ class HierarchyRouter:
                     return
             per_stage_prob[subset[0]] += parent_prob
 
-        walk([1, 2, 3, 4], 1.0, rules)
+        use_combiner = self.combiner is not None and all(
+            c in prob_cache for c in self.combiner_cuts
+        )
+        if use_combiner:
+            feat = np.array([[prob_cache[c] for c in self.combiner_cuts]], dtype=float)
+            proba = self.combiner.predict_proba(feat)[0]
+            classes = [int(c) for c in self.combiner.classes_]
+            per_stage_prob = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+            for i, cls in enumerate(classes):
+                per_stage_prob[cls] = float(proba[i])
+            final_stage = classes[int(np.argmax(proba))]
+            method = f"combiner[{self.combiner_featureset}] {self.combiner_name}"
+        else:
+            walk([1, 2, 3, 4], 1.0, rules)
+            final_stage = max(per_stage_prob.items(), key=lambda kv: kv[1])[0]
+            method = f"hierarchy {self.topology['name']} {self.topology['description']}"
 
-        final_stage = max(per_stage_prob.items(), key=lambda kv: kv[1])[0]
         return {
             "final_stage": final_stage,
             "per_stage": per_stage_prob,
             "cams": cam_data,
             "prob_cache": prob_cache,
             "rules": rules,
+            "method": method,
         }
 
 
@@ -289,6 +323,7 @@ def predict():
             "cropped_image":   "data:image/jpeg;base64," + cropped_b64,
             "stage": f"Stage {result['final_stage']}",
             "sorted_probs": sorted_probs,
+            "method": result.get("method", ""),
             "topology": router.topology["name"] + " " + router.topology["description"],
             "cam_overlays": cam_overlays,
             "gradcam_m1": cam_overlays[0]["image"] if len(cam_overlays) > 0 else None,

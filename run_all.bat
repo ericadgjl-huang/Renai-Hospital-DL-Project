@@ -76,20 +76,20 @@ if errorlevel 1 goto :error
 
 :step5
 echo.
-echo [5/7] Sync Web App runtime (_runtime.json)...
-%PY% scripts\07_update_web.py
+echo [5/7] Train learned combiner and compare vs hierarchy (saves combiner model)...
+%PY% scripts\09_train_combiner.py
 if errorlevel 1 goto :error
 
 :step6
 echo.
-echo [6/7] Bootstrap 95%% CIs for test metrics...
-%PY% scripts\08_report_ci.py
+echo [6/7] Sync Web App runtime (_runtime.json + combiner)...
+%PY% scripts\07_update_web.py
 if errorlevel 1 goto :error
 
 :step7
 echo.
-echo [7/7] Train learned combiner and compare vs hierarchy...
-%PY% scripts\09_train_combiner.py
+echo [7/7] Bootstrap 95%% CIs for test metrics...
+%PY% scripts\08_report_ci.py
 if errorlevel 1 goto :error
 
 echo.
