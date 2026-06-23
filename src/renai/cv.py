@@ -24,6 +24,7 @@ import torch
 from .data import (
     Cut,
     filter_indices_for_cut,
+    get_4class_labels,
     make_cv_folds,
     make_loaders_for_cut,
     make_outer_split,
@@ -52,6 +53,19 @@ def _round(v: float, n: int = 4) -> float:
     return float("nan") if (v is None or math.isnan(v)) else round(float(v), n)
 
 
+def _balanced_class_weights(data_root: Path, cut: Cut, tr_idx) -> list[float]:
+    """sklearn-'balanced' weights for the binary cut on this fold's train set:
+    w_c = n_samples / (n_classes * count_c). Counters class imbalance in CE."""
+    labels4 = get_4class_labels(data_root).numpy()
+    bin_labels = [cut.relabel(int(labels4[i])) for i in tr_idx]
+    n = len(bin_labels)
+    counts = [bin_labels.count(0), bin_labels.count(1)]
+    return [
+        (n / (2.0 * c)) if c > 0 else 0.0
+        for c in counts
+    ]
+
+
 def run_cv_for_cut(
     cut: Cut,
     data_root: Path,
@@ -64,6 +78,8 @@ def run_cv_for_cut(
     batch_size: int = 16,
     device: str = "cuda",
     test_ratio: float = 0.2,
+    weight_decay: float = 1e-4,
+    patience: int = 8,
     smoke: bool = False,
 ) -> CutCVResult:
     """Run 5-fold CV for a single cut. Reproducible — fixed seed."""
@@ -99,6 +115,7 @@ def run_cv_for_cut(
             tr_loader, va_loader = make_loaders_for_cut(
                 data_root, cut, tr_idx, va_idx, batch_size=batch_size,
             )
+            class_weights = _balanced_class_weights(data_root, cut, tr_idx)
             tr = train_one(
                 backbone=backbone,
                 train_loader=tr_loader,
@@ -107,6 +124,9 @@ def run_cv_for_cut(
                 device=device,
                 epochs=epochs,
                 lr=lr,
+                weight_decay=weight_decay,
+                patience=patience,
+                class_weights=class_weights,
             )
 
             model = create_model(backbone, num_classes=2).to(device)

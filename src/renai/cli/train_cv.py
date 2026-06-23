@@ -27,6 +27,8 @@ def main():
         lr=args.lr,
         batch_size=args.batch_size,
         device=args.device,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
         smoke=args.smoke,
     )
     print("\n=== summary ===")

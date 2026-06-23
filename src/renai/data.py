@@ -20,7 +20,12 @@ from typing import Iterable, Sequence
 
 import torch
 import torchvision.transforms as T
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision.datasets import ImageFolder
 
@@ -33,9 +38,17 @@ NUM_STAGES = 4
 
 
 def make_train_transform(img_size: int = IMG_SIZE) -> T.Compose:
+    """Augmentation for tiny radiograph data.
+
+    Deliberately NO horizontal flip: the dataset pipeline already flips every
+    right hip to the left orientation, so a flip would reverse the medial/
+    lateral sides of the femoral head and undo that normalization. We use mild
+    affine jitter (rotation + small translate/scale) plus brightness/contrast
+    jitter to mimic positioning and exposure variation."""
     return T.Compose([
         T.Resize((img_size, img_size)),
-        T.RandomRotation(10),
+        T.RandomAffine(degrees=12, translate=(0.06, 0.06), scale=(0.9, 1.1)),
+        T.ColorJitter(brightness=0.2, contrast=0.2),
         T.ToTensor(),
         T.Normalize(NORM_MEAN, NORM_STD),
     ])
@@ -103,6 +116,41 @@ def get_4class_labels(data_root: Path) -> torch.Tensor:
     return torch.tensor([y for _, y in base.samples], dtype=torch.long)
 
 
+def patient_groups(data_root: Path, roi_csv: Path | None = None):
+    """Return a group id per ImageFolder sample (for GroupKFold), or None.
+
+    Looks for a ``patient`` / ``patient_id`` column in ``roi_csv`` and maps it
+    onto the ImageFolder sample order by filename. Returns None (and prints a
+    warning) when no such column exists — which is the CURRENT state of this
+    dataset: filenames `S<stage>_<side><n>.jpg` encode stage+side only, so two
+    images CANNOT be linked to the same patient. Provide a CSV with a patient
+    column to enable true patient-level splits and remove leakage risk."""
+    if roi_csv is None or not Path(roi_csv).exists():
+        print("[groups] no roi_csv -> patient grouping disabled "
+              "(image-level split; possible patient leakage).", flush=True)
+        return None
+    try:
+        import pandas as pd
+        df = pd.read_csv(roi_csv)
+    except Exception as e:  # noqa: BLE001
+        print(f"[groups] could not read {roi_csv}: {e}", flush=True)
+        return None
+
+    pid_col = next((c for c in ("patient", "patient_id", "pid") if c in df.columns), None)
+    if pid_col is None or "filename" not in df.columns:
+        print(f"[groups] {Path(roi_csv).name} has no patient column "
+              f"(cols={list(df.columns)}) -> grouping disabled.", flush=True)
+        return None
+
+    fname_to_pid = dict(zip(df["filename"].astype(str), df[pid_col].astype(str)))
+    base = ImageFolder(data_root)
+    groups = [fname_to_pid.get(Path(p).name, Path(p).name) for p, _ in base.samples]
+    n_groups = len(set(groups))
+    print(f"[groups] patient grouping ENABLED: {n_groups} groups over {len(groups)} images.",
+          flush=True)
+    return groups
+
+
 def filter_indices_for_cut(
     data_root: Path,
     indices: Sequence[int],
@@ -124,23 +172,34 @@ def make_outer_split(
     out_path: Path,
     test_ratio: float = 0.2,
     seed: int = SEED,
+    groups=None,
 ) -> dict:
-    """Compute (and cache) a stratified 80/20 split on the 4-class labels."""
+    """Compute (and cache) an 80/20 outer split on the 4-class labels.
+
+    When `groups` is given (one id per sample), the split is made with
+    GroupShuffleSplit so no patient appears in both train_val and test. Without
+    groups it falls back to a stratified image-level split (current behaviour)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
         return json.loads(out_path.read_text(encoding="utf-8"))
 
     labels = get_4class_labels(data_root).numpy()
     indices = list(range(len(labels)))
-    train_val_idx, test_idx = train_test_split(
-        indices,
-        test_size=test_ratio,
-        random_state=seed,
-        stratify=labels,
-    )
+    grouped = groups is not None
+    if grouped:
+        gss = GroupShuffleSplit(n_splits=1, test_size=test_ratio, random_state=seed)
+        train_val_idx, test_idx = next(gss.split(indices, labels, groups=groups))
+    else:
+        train_val_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_ratio,
+            random_state=seed,
+            stratify=labels,
+        )
     payload = {
         "seed": seed,
         "test_ratio": test_ratio,
+        "grouped": bool(grouped),
         "train_val_idx": sorted(map(int, train_val_idx)),
         "test_idx": sorted(map(int, test_idx)),
         "n_total": int(len(labels)),
@@ -155,17 +214,26 @@ def make_cv_folds(
     train_val_idx: Sequence[int],
     n_splits: int = 5,
     seed: int = SEED,
+    groups=None,
 ) -> list[tuple[list[int], list[int]]]:
-    """5-fold stratified CV on the 4-class labels restricted to train_val_idx.
+    """5-fold CV on the 4-class labels restricted to train_val_idx.
 
-    Returns a list of (train_idx, val_idx) pairs in *global* dataset indices."""
+    Returns a list of (train_idx, val_idx) pairs in *global* dataset indices.
+    When `groups` is given (one id per global sample), uses StratifiedGroupKFold
+    so a patient never spans train and val; otherwise plain StratifiedKFold."""
     labels = get_4class_labels(data_root).numpy()
-    sub_labels = labels[list(train_val_idx)]
-
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    folds: list[tuple[list[int], list[int]]] = []
     sub_idx = list(train_val_idx)
-    for tr, va in skf.split(sub_idx, sub_labels):
+    sub_labels = labels[sub_idx]
+
+    folds: list[tuple[list[int], list[int]]] = []
+    if groups is not None:
+        sub_groups = [groups[i] for i in sub_idx]
+        sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        splitter = sgkf.split(sub_idx, sub_labels, groups=sub_groups)
+    else:
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        splitter = skf.split(sub_idx, sub_labels)
+    for tr, va in splitter:
         tr_global = [int(sub_idx[i]) for i in tr]
         va_global = [int(sub_idx[i]) for i in va]
         folds.append((tr_global, va_global))

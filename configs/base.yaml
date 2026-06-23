@@ -4,8 +4,13 @@ img_size: 384
 batch_size: 16
 epochs: 30
 lr: 1.0e-4
+weight_decay: 1.0e-4     # AdamW decoupled L2 (small-data regularization)
+patience: 8              # early-stop epochs w/o val-macro-F1 gain (0=off)
 n_splits: 5
 test_ratio: 0.2
+# Training uses class-weighted cross-entropy (sklearn-'balanced' per fold).
+# Augmentation: mild affine + brightness/contrast jitter, NO horizontal flip
+# (right hips are pre-flipped to left, so a flip would undo that normalization).
 
 backbones:
   - efficientnet_b0

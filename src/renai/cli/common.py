@@ -25,6 +25,10 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--weight-decay", type=float, default=1e-4,
+                   help="AdamW decoupled L2 (regularization for small data)")
+    p.add_argument("--patience", type=int, default=8,
+                   help="Early-stop after N epochs without val-macro-F1 gain (0=off)")
     p.add_argument("--smoke", action="store_true",
                    help="Tiny run: 1 fold, ≤2 epochs — for sanity checking")
 

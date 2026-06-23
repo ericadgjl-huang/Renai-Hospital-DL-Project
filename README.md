@@ -9,6 +9,38 @@
 
 ---
 
+## 2026-06 方法學更新（重要）
+
+這批改動的目的是讓結果**誠實、可在論文中辯護**，並修掉幾個會虛報分數的問題：
+
+1. **topology 不再用 test set 選**（修掉資料洩漏）。
+   `06_search_hierarchy.py` 改成用 train_val 的 **OOF 4-class routing macro-F1** 選最佳 topology，
+   outer test 只用來「回報」最終分數。`best_topology.json` 會同時記 `oof_macro_f1` 與 `test_macro_f1`，
+   並標 `selected_by: oof_macro_f1`。
+
+2. **bootstrap 95% 信賴區間**（`08_report_ci.py`）。
+   test set 只有 ~58 張，單一數字沒有意義。產生 `outputs/report/ci_report.md`，
+   例如 `macro-F1 0.668 (95% CI 0.531–0.782)`。並附人類 Ficat 判讀一致性 κ≈0.39–0.46 作為基準。
+
+3. **學習型 combiner**（`09_train_combiner.py`，對應「3 刀 → 機率 → 分類器」的想法）。
+   把每個 cut 的 `P(class=1)` 當特徵，用 LogReg / SVM(linear,rbf) / RandomForest / HistGradientBoosting
+   做 4-class，**用 OOF 選模型、test 只回報**，並與硬路由 hierarchy 並排比較
+   （`outputs/combiner/comparison.csv`）。可取代「一刀切錯就回不來」的硬路由。
+
+4. **訓練正則化**（`train.py` / `cv.py`）。
+   class-weighted cross-entropy + AdamW weight decay + early stopping，
+   增強改為 affine + 亮度/對比 jitter（**刻意不水平翻轉**，因為右髖已被翻成左髖方向）。
+   這些只在**重新訓練**（`04_train_all_cuts.py`）後生效。新增 CLI 旗標：`--weight-decay`、`--patience`。
+
+5. **GroupKFold 準備**（`data.py`）。
+   目前檔名 `S<stage>_<side><n>.jpg` **沒有病人 ID**，無法做病人層級切分（有潛在 patient leakage 風險）。
+   `make_outer_split` / `make_cv_folds` 已支援可選 `groups` 參數，`patient_groups()` 會在
+   `roi_all.csv` 出現 `patient` 欄位時自動啟用 `StratifiedGroupKFold`。**請向醫院索取 filename→病人 對照表。**
+
+> 一鍵跑（先 `conda activate unet_labeling`）：`run_all.bat`（從既有 checkpoints 重建並產生上述全部報表）。
+
+---
+
 ## 從 Drive 原始資料到最終輸出
 
 以下指令假設你在專案根目錄執行，也就是有：

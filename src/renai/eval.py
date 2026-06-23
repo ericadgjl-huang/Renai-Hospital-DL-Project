@@ -57,6 +57,46 @@ def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray, probs: np.ndarray | N
     return out
 
 
+def bootstrap_classification_ci(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    n_boot: int = 2000,
+    seed: int = 42,
+    alpha: float = 0.05,
+) -> dict:
+    """Bootstrap (percentile) confidence intervals for accuracy and macro-F1.
+
+    With a tiny test set (here n≈58) a single point estimate is misleading;
+    resampling the test set with replacement gives an honest interval that a
+    thesis reviewer expects to see reported."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    n = len(y_true)
+    point_acc = float(accuracy_score(y_true, y_pred)) if n else float("nan")
+    point_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0)) if n else float("nan")
+
+    rng = np.random.default_rng(seed)
+    accs = np.empty(n_boot, dtype=np.float64)
+    f1s = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, n)
+        yt, yp = y_true[idx], y_pred[idx]
+        accs[b] = accuracy_score(yt, yp)
+        f1s[b] = f1_score(yt, yp, average="macro", zero_division=0)
+
+    lo_q, hi_q = 100 * alpha / 2, 100 * (1 - alpha / 2)
+    return {
+        "n": int(n),
+        "n_boot": int(n_boot),
+        "accuracy": point_acc,
+        "accuracy_ci_low": float(np.percentile(accs, lo_q)),
+        "accuracy_ci_high": float(np.percentile(accs, hi_q)),
+        "macro_f1": point_f1,
+        "macro_f1_ci_low": float(np.percentile(f1s, lo_q)),
+        "macro_f1_ci_high": float(np.percentile(f1s, hi_q)),
+    }
+
+
 def save_confusion_matrix(
     y_true: np.ndarray,
     y_pred: np.ndarray,

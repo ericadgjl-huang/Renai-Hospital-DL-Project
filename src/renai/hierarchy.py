@@ -28,7 +28,14 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from .data import Cut, make_4class_eval_loader, make_outer_split
+from .data import (
+    Cut,
+    filter_indices_for_cut,
+    get_4class_labels,
+    make_4class_eval_loader,
+    make_cv_folds,
+    make_outer_split,
+)
 from .eval import (
     binary_metrics,
     dump_json,
@@ -121,12 +128,14 @@ class CutPredictor:
         )
 
         self._models: list[tuple[str, torch.nn.Module]] = []
+        self.fold_models: dict[int, torch.nn.Module] = {}
         for k, entry in enumerate(self.members, 1):
             bb = entry["backbone"]
             m = create_model(bb, num_classes=2).to(device)
             m.load_state_dict(torch.load(entry["ckpt"], map_location=device))
             m.eval()
             self._models.append((bb, m))
+            self.fold_models[int(entry["fold"])] = m
             print(
                 f"    .. fold {entry['fold']} bb={bb} loaded ({k}/{len(self.members)})",
                 flush=True,
@@ -155,11 +164,69 @@ class CutPredictor:
 
         return avg_softmax[:, 1]
 
+    @torch.no_grad()
+    def raw_softvote_prob1(self, x: torch.Tensor) -> np.ndarray:
+        """Mean softmax P(class=1) over the 5 fold-winners, *ignoring* any meta.
+
+        Used only for leak-free OOF topology selection. (For cuts whose chosen
+        strategy is fold_voting — all of them, currently — this is identical to
+        `prob_class1`.)"""
+        x = x.to(self.device)
+        sums: np.ndarray | None = None
+        for _bb, m in self._models:
+            p = F.softmax(m(x), dim=1).cpu().numpy()
+            sums = p if sums is None else sums + p
+        if sums is None:
+            return np.array([])
+        return (sums / float(len(self._models)))[:, 1]
+
+    @torch.no_grad()
+    def fold_prob1(self, x: torch.Tensor, fold: int) -> np.ndarray:
+        """P(class=1) from a single fold's winner model (the model that did NOT
+        train on that fold's validation samples)."""
+        m = self.fold_models[int(fold)]
+        p = F.softmax(m(x.to(self.device)), dim=1).cpu().numpy()
+        return p[:, 1]
+
 
 # ----- Hierarchy inference --------------------------------------------------
 
 def topology_required_cuts(topo: Topology) -> set[str]:
     return {r[0] for r in topo.rules}
+
+
+def route_samples(
+    topo: Topology,
+    per_cut_p1: dict[str, np.ndarray],
+    n: int,
+) -> np.ndarray:
+    """Route n samples through a topology given per-cut P(class=1) arrays.
+
+    `per_cut_p1[cut][i]` is the i-th sample's probability of going *right* at
+    that cut. Returns 1-based predicted stage (1..4). Pure function — works the
+    same whether the probabilities came from test soft-vote or from OOF."""
+    pred_class = np.zeros(n, dtype=np.int64)
+    rule_a = topo.rules[0]
+    _, leftA, rightA = rule_a
+
+    def resolve(subset: tuple[int, ...], i: int, rules: list) -> int:
+        if len(subset) == 1:
+            return subset[0]
+        for r in rules:
+            cn, L, R = r
+            if tuple(sorted(L + R)) == tuple(sorted(subset)):
+                go_right = per_cut_p1[cn][i] >= 0.5
+                next_subset = R if go_right else L
+                next_rules = [rr for rr in rules if rr is not r]
+                return resolve(next_subset, i, next_rules)
+        return subset[0]
+
+    pA1 = per_cut_p1[rule_a[0]]
+    for i in range(n):
+        go_right = pA1[i] >= 0.5
+        subset = rightA if go_right else leftA
+        pred_class[i] = resolve(subset, i, list(topo.rules[1:]))
+    return pred_class
 
 
 def predict_topology(
@@ -193,33 +260,98 @@ def predict_topology(
         first_pass = False
 
     y_true_arr = np.asarray(y_true, dtype=np.int64)
-    n = len(y_true_arr)
-    pred_class = np.zeros(n, dtype=np.int64)
-
-    rule_a = topo.rules[0]
-    _, leftA, rightA = rule_a
-
-    def resolve(subset: tuple[int, ...], i: int, rules: list) -> int:
-        if len(subset) == 1:
-            return subset[0]
-        for r in rules:
-            cn, L, R = r
-            if tuple(sorted(L + R)) == tuple(sorted(subset)):
-                p_right = per_cut[cn][i]
-                go_right = p_right >= 0.5
-                next_subset = R if go_right else L
-                next_rules = [rr for rr in rules if rr is not r]
-                return resolve(next_subset, i, next_rules)
-        return subset[0]
-
-    pA1 = per_cut[rule_a[0]]
-    for i in range(n):
-        go_right = pA1[i] >= 0.5
-        subset = rightA if go_right else leftA
-        remaining_rules = list(topo.rules[1:])
-        pred_class[i] = resolve(subset, i, remaining_rules)
-
+    pred_class = route_samples(topo, per_cut, len(y_true_arr))
     return y_true_arr, pred_class
+
+
+# ----- Out-of-fold topology selection (no test set involved) ----------------
+
+def compute_oof_cut_p1(
+    cut: Cut,
+    predictor: CutPredictor,
+    data_root: Path,
+    splits_dir: Path,
+    tv: list[int],
+    batch_size: int = 16,
+) -> np.ndarray:
+    """Leak-free P(go right at this cut) for every train_val sample.
+
+    Two regimes, both unbiased w.r.t. the sample being scored:
+      * sample's stage IS in this cut -> use the fold-winner of the fold where
+        that sample sat in *validation* (that model never trained on it);
+      * sample's stage is NOT in this cut (e.g. a stage-1 image under 2_vs_3)
+        -> no fold-winner ever trained on it, so the 5-winner soft-vote is fine.
+
+    Returns an array aligned to `tv` (sorted global train_val indices)."""
+    pos = {int(g): i for i, g in enumerate(tv)}
+    n = len(tv)
+
+    # regime 2 default: soft-vote over all winners for every train_val sample.
+    tv_loader = make_4class_eval_loader(data_root, tv, batch_size=batch_size)
+    chunks = [predictor.raw_softvote_prob1(imgs) for imgs, _ in tv_loader]
+    p1 = np.concatenate(chunks).astype(np.float64) if chunks else np.zeros(n)
+
+    # regime 1 override: in-cut samples get their own validation fold's prob.
+    outer = make_outer_split(data_root, splits_dir / "outer_split.json")
+    cut_tv = filter_indices_for_cut(data_root, outer["train_val_idx"], cut)
+    folds = make_cv_folds(data_root, cut_tv)
+    for fi, (_tr, va) in enumerate(folds):
+        if fi not in predictor.fold_models or len(va) == 0:
+            continue
+        va = [int(g) for g in va]
+        va_loader = make_4class_eval_loader(data_root, va, batch_size=batch_size)
+        fp = np.concatenate(
+            [predictor.fold_prob1(imgs, fi) for imgs, _ in va_loader]
+        )
+        for j, g in enumerate(va):
+            if g in pos:
+                p1[pos[g]] = float(fp[j])
+    return p1
+
+
+def oof_topology_scores(
+    cuts: dict[str, Cut],
+    predictors: dict[str, CutPredictor],
+    available_cuts: set[str],
+    data_root: Path,
+    splits_dir: Path,
+    batch_size: int = 16,
+) -> dict[str, dict]:
+    """Score all 5 topologies by 4-class macro-F1 on OOF train_val predictions.
+
+    This is the selection signal — it never touches the outer test set."""
+    from sklearn.metrics import accuracy_score as _acc, f1_score as _f1
+
+    outer = make_outer_split(data_root, splits_dir / "outer_split.json")
+    tv = sorted(int(i) for i in outer["train_val_idx"])
+    labels = get_4class_labels(data_root).numpy()
+    y_tv = labels[tv] + 1  # 1-based
+
+    needed = {r[0] for t in TOPOLOGIES.values() for r in t.rules} & available_cuts
+    per_cut_oof: dict[str, np.ndarray] = {}
+    for cn in sorted(needed):
+        print(
+            f"  [oof] cut={cn}: P1 over {len(tv)} train_val samples", flush=True
+        )
+        per_cut_oof[cn] = compute_oof_cut_p1(
+            cuts[cn], predictors[cn], data_root, splits_dir, tv, batch_size
+        )
+
+    scores: dict[str, dict] = {}
+    for topo in TOPOLOGIES.values():
+        if not topology_required_cuts(topo).issubset(available_cuts):
+            scores[topo.name] = {"oof_macro_f1": float("nan"), "oof_accuracy": float("nan")}
+            continue
+        pred = route_samples(topo, per_cut_oof, len(y_tv))
+        scores[topo.name] = {
+            "oof_macro_f1": float(_f1(y_tv, pred, average="macro", zero_division=0)),
+            "oof_accuracy": float(_acc(y_tv, pred)),
+        }
+        print(
+            f"  [oof] {topo.name}: oof_macro_f1={scores[topo.name]['oof_macro_f1']:.4f}",
+            flush=True,
+        )
+    return scores
 
 
 def search_best_topology(
@@ -253,12 +385,20 @@ def search_best_topology(
             print(f"  [skip] {cn}: no ensemble/winner.json", flush=True)
     print(f"[hierarchy] {len(predictors)}/{len(all_needed)} cuts ready", flush=True)
 
-    rows = []
     hier_dir = out_root / "hierarchy"
     hier_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- SELECTION signal: OOF macro-F1 on the train_val pool (no test) ------
+    print("\n[hierarchy] computing OOF topology scores (selection signal) ...", flush=True)
+    oof_scores = oof_topology_scores(
+        cuts, predictors, available_cuts, data_root, splits_dir, batch_size
+    )
+
+    # --- REPORT only: every topology evaluated on the held-out test set ------
+    rows = []
     for topo in TOPOLOGIES.values():
         print(f"\n[hierarchy] === topology {topo.name} {topo.description} ===", flush=True)
+        oof_m = oof_scores.get(topo.name, {})
         needed = topology_required_cuts(topo)
         if not needed.issubset(available_cuts):
             missing = sorted(needed - available_cuts)
@@ -266,7 +406,9 @@ def search_best_topology(
             rows.append({
                 "topology": topo.name, "description": topo.description,
                 "status": "skipped", "missing_cuts": ",".join(missing),
-                "macro_f1": float("nan"), "accuracy": float("nan"),
+                "oof_macro_f1": float("nan"), "oof_accuracy": float("nan"),
+                "test_macro_f1": float("nan"), "test_accuracy": float("nan"),
+                "test_weighted_f1": float("nan"),
             })
             continue
 
@@ -276,12 +418,15 @@ def search_best_topology(
         m["macro_f1"] = float(_f1(y_true, y_pred, average="macro", zero_division=0))
         m["weighted_f1"] = float(_f1(y_true, y_pred, average="weighted", zero_division=0))
         print(
-            f"  [{topo.name}] acc={m['accuracy']:.4f}  macro_f1={m['macro_f1']:.4f}",
+            f"  [{topo.name}] oof_macro_f1={oof_m.get('oof_macro_f1', float('nan')):.4f}"
+            f"  | test_acc={m['accuracy']:.4f}  test_macro_f1={m['macro_f1']:.4f} (report only)",
             flush=True,
         )
 
         topo_dir = hier_dir / topo.name
         topo_dir.mkdir(parents=True, exist_ok=True)
+        np.save(topo_dir / "test_y_true.npy", y_true)
+        np.save(topo_dir / "test_y_pred.npy", y_pred)
         save_confusion_matrix(
             y_true - 1, y_pred - 1,
             ["stage_1", "stage_2", "stage_3", "stage_4"],
@@ -293,27 +438,45 @@ def search_best_topology(
             ["stage_1", "stage_2", "stage_3", "stage_4"],
             topo_dir / "classification_report_test.txt",
         )
-        dump_json({"topology": topo.name, **m}, topo_dir / "metrics.json")
+        dump_json({"topology": topo.name, **oof_m, **m}, topo_dir / "metrics.json")
 
         rows.append({
             "topology": topo.name, "description": topo.description,
             "status": "ok", "missing_cuts": "",
-            **{k: m[k] for k in ("accuracy", "macro_f1", "weighted_f1")},
+            "oof_macro_f1": float(oof_m.get("oof_macro_f1", float("nan"))),
+            "oof_accuracy": float(oof_m.get("oof_accuracy", float("nan"))),
+            "test_macro_f1": m["macro_f1"],
+            "test_accuracy": m["accuracy"],
+            "test_weighted_f1": m["weighted_f1"],
         })
 
     df = pd.DataFrame(rows)
-    df_ok = df[df["status"] == "ok"].dropna(subset=["macro_f1"])
-    best_row = df_ok.sort_values("macro_f1", ascending=False).iloc[0] if len(df_ok) else None
-
+    # Winner is chosen by OOF macro-F1 — NOT by test (which would leak).
+    df_ok = df[df["status"] == "ok"].dropna(subset=["oof_macro_f1"])
+    best_row = (
+        df_ok.sort_values("oof_macro_f1", ascending=False).iloc[0]
+        if len(df_ok) else None
+    )
+    if best_row is not None:
+        df["selected"] = df["topology"] == str(best_row["topology"])
     df.to_csv(hier_dir / "search_results.csv", index=False, encoding="utf-8-sig")
 
     if best_row is not None:
         topo = TOPOLOGIES[str(best_row["topology"])]
+        print(
+            f"\n[hierarchy] SELECTED {topo.name} by OOF macro_f1="
+            f"{float(best_row['oof_macro_f1']):.4f} "
+            f"(its test macro_f1={float(best_row['test_macro_f1']):.4f}, report only)",
+            flush=True,
+        )
         winner_payload = {
             "name": topo.name,
             "description": topo.description,
-            "macro_f1": float(best_row["macro_f1"]),
-            "accuracy": float(best_row["accuracy"]),
+            "selected_by": "oof_macro_f1",
+            "oof_macro_f1": float(best_row["oof_macro_f1"]),
+            "oof_accuracy": float(best_row["oof_accuracy"]),
+            "test_macro_f1": float(best_row["test_macro_f1"]),
+            "test_accuracy": float(best_row["test_accuracy"]),
             "rules": [
                 {"cut": r[0], "left": list(r[1]), "right": list(r[2])}
                 for r in topo.rules
