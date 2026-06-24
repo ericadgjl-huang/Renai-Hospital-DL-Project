@@ -464,6 +464,67 @@ def run_combiner(
     return result
 
 
+_EMBED_DIM = {
+    "efficientnet_b0": 1280, "efficientnet_b1": 1280, "resnet50": 2048,
+    "convnext_tiny": 768, "convnext_small": 768,
+    "densenet121": 1024, "densenet169": 1664,
+}
+
+
+def visualize_embeddings_tsne(
+    out_root: Path,
+    data_root: Path,
+    splits_dir: Path,
+    device: str = "cuda",
+    perplexity: float = 30.0,
+    seed: int = SEED,
+) -> list[str]:
+    """t-SNE of the OOF embeddings, coloured by 4-class stage. VISUALIZATION
+    only — t-SNE has no transform and must not be used as classifier features.
+    Saves a concat plot plus one per ordinal cut."""
+    import matplotlib.pyplot as plt
+    from sklearn.manifold import TSNE
+
+    X_oof, y_tv, _Xt, _yt, used = build_embedding_features(
+        ORDINAL_CUTS, out_root, data_root, splits_dir, device
+    )
+    dims = [_EMBED_DIM[u.split(":")[1]] for u in used]
+    bounds = np.cumsum([0] + dims)
+    tdir = out_root / "combiner" / "tsne"
+    tdir.mkdir(parents=True, exist_ok=True)
+
+    def _scatter(emb2d, title, path):
+        fig, ax = plt.subplots(figsize=(6, 5))
+        for s, color in zip([1, 2, 3, 4], ["#1f77b4", "#2ca02c", "#ff7f0e", "#d62728"]):
+            mask = y_tv == s
+            ax.scatter(emb2d[mask, 0], emb2d[mask, 1], s=18, c=color,
+                       label=f"stage {s}", alpha=0.7, edgecolors="none")
+        ax.set_title(title)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        fig.savefig(path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  [tsne] wrote {path}", flush=True)
+
+    def _tsne(X):
+        Xs = StandardScaler().fit_transform(X)
+        n = len(Xs)
+        perp = float(min(perplexity, max(5, (n - 1) // 3)))
+        return TSNE(n_components=2, perplexity=perp, init="pca",
+                    random_state=seed).fit_transform(Xs)
+
+    saved = []
+    p = tdir / "tsne_concat.png"
+    _scatter(_tsne(X_oof), f"OOF embeddings (concat {X_oof.shape[1]}-d)", p)
+    saved.append(str(p))
+    for k, cn in enumerate(ORDINAL_CUTS):
+        p = tdir / f"tsne_{cn}.png"
+        _scatter(_tsne(X_oof[:, bounds[k]:bounds[k + 1]]), f"{cn}  [{used[k]}]", p)
+        saved.append(str(p))
+    return saved
+
+
 def compare_with_hierarchy(
     out_root: Path,
     data_root: Path,
