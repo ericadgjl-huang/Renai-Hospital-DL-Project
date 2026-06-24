@@ -39,3 +39,6 @@ weights/
 web_app/_model_cache/
 web_app/_runtime.json
 web_app/temp.jpg
+
+# No-CV experiment artifacts (figures/ckpts kept locally for the thesis)
+outputs_nocv/
