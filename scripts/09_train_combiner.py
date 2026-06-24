@@ -28,6 +28,10 @@ def main():
     p = argparse.ArgumentParser(description="Train learned combiner; compare to hierarchy.")
     add_common_args(p)
     p.add_argument("--n-boot", type=int, default=2000)
+    p.add_argument("--embed", action="store_true",
+                   help="Also run the high-dim penultimate-embedding variant (idea #4 v3)")
+    p.add_argument("--pca", type=int, default=50,
+                   help="PCA components for the embedding variant (0 = no PCA)")
     args = p.parse_args()
     compare_with_hierarchy(
         out_root=args.out_root,
@@ -36,6 +40,8 @@ def main():
         device=args.device,
         batch_size=args.batch_size,
         n_boot=args.n_boot,
+        embed=args.embed,
+        pca_n=args.pca,
     )
 
 
