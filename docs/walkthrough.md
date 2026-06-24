@@ -169,10 +169,13 @@ http://127.0.0.1:5000
 | `Models not initialized` | `_runtime.json` 不存在 → 先跑 `run_all.bat` |
 | 改了模型但網頁沒變 | Flask 要重啟才會重讀 `_runtime.json` |
 
-> 注意：若 `_runtime.json` 內有 combiner 區塊（`07_update_web.py` 會在 `outputs/combiner/topology3/`
-> 有模型時自動寫入），demo 網頁的**最終 Stage 會改用學習型 combiner**（取代硬路由），啟動時會印
-> `[boot] combiner = topology3 / <model>`。沒有 combiner 時則自動退回 hierarchy 硬路由。
-> Grad-CAM 仍是各 cut 各自產生。重訓 (`run_all.bat train`) 後 combiner 會用新模型重建並自動接上。
+> 注意：若有訓練好的 combiner，demo 網頁的**最終 Stage 會改用學習型 combiner**（取代硬路由）。
+> `07_update_web.py` 會在 `combiner[all]` 與 `combiner[topology3]` 之間**挑 OOF 較高者**寫入
+> `_runtime.json`（通常是 `all`，用全部 10 個 cut），並自動把所需的 cut 全部載入網頁。
+> 啟動時會印 `[boot] combiner = all / <model>`，predict 回傳的 `method` 會是 `combiner[all] <model>`。
+> 沒有 combiner 時自動退回 hierarchy 硬路由。Grad-CAM 仍只畫 topology 的 3 個 cut。
+> 候選分類器：logreg / SVM(linear,rbf) / RandomForest / HistGradientBoosting / XGBoost / LightGBM
+> （XGBoost、LightGBM 需另外安裝；未安裝則自動略過）。
 
 ---
 

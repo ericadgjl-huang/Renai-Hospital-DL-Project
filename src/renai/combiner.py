@@ -28,10 +28,12 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import SVC
 
 from .cuts_registry import CUTS
@@ -49,9 +51,37 @@ from .seed import SEED, set_seed
 STAGE_NAMES = ["stage_1", "stage_2", "stage_3", "stage_4"]
 
 
+class _LabelOffsetClassifier(BaseEstimator, ClassifierMixin):
+    """Wrap a classifier that requires labels 0..K-1 (e.g. XGBoost) so it accepts
+    our 1-based stage labels. Exposes classes_/predict/predict_proba in the
+    original label space; clone-safe for cross_val_predict."""
+
+    def __init__(self, base):
+        self.base = base
+
+    def fit(self, X, y):
+        self._le = LabelEncoder()
+        y_enc = self._le.fit_transform(y)
+        self.base_ = clone(self.base)
+        self.base_.fit(X, y_enc)
+        self.classes_ = self._le.classes_
+        return self
+
+    def predict(self, X):
+        return self._le.inverse_transform(self.base_.predict(X))
+
+    def predict_proba(self, X):
+        # base_.classes_ are 0..K-1 in the LabelEncoder order, so columns align
+        # with self.classes_ (sorted original labels).
+        return self.base_.predict_proba(X)
+
+
 def candidate_models(seed: int = SEED) -> dict:
-    """The user's wish list: boosting, tree, and SVM with two kernels."""
-    return {
+    """The user's wish list: boosting (HistGB / XGBoost / LightGBM), tree
+    (RandomForest), and SVM with two kernels (+ logreg baseline).
+
+    XGBoost / LightGBM are added only if installed."""
+    models: dict = {
         "logreg": LogisticRegression(
             class_weight="balanced", max_iter=2000, random_state=seed
         ),
@@ -68,6 +98,24 @@ def candidate_models(seed: int = SEED) -> dict:
             max_iter=300, learning_rate=0.05, random_state=seed
         ),
     }
+    try:
+        from xgboost import XGBClassifier
+        models["xgboost"] = _LabelOffsetClassifier(XGBClassifier(
+            n_estimators=300, max_depth=3, learning_rate=0.05,
+            subsample=0.9, colsample_bytree=0.9, eval_metric="mlogloss",
+            random_state=seed, verbosity=0,
+        ))
+    except Exception:
+        pass
+    try:
+        from lightgbm import LGBMClassifier
+        models["lightgbm"] = LGBMClassifier(
+            n_estimators=300, max_depth=3, learning_rate=0.05,
+            class_weight="balanced", random_state=seed, verbose=-1,
+        )
+    except Exception:
+        pass
+    return models
 
 
 def _load_predictors(cut_names, out_root: Path, device: str) -> dict[str, CutPredictor]:

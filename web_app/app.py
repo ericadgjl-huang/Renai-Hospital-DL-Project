@@ -147,7 +147,12 @@ class HierarchyRouter:
             backbone, cam = self.cuts[r["cut"]].gradcam(x)
             cam_data.append({"cut": r["cut"], "backbone": backbone, "cam": cam})
 
-        prob_cache = {r["cut"]: self.cuts[r["cut"]].prob_class1(x) for r in rules}
+        # Probabilities for the routing cuts AND any extra cuts the combiner needs
+        # (combiner[all] uses up to 10 cuts; 07_update_web loads them all).
+        needed_cuts = {r["cut"] for r in rules} | set(self.combiner_cuts)
+        prob_cache = {
+            cn: self.cuts[cn].prob_class1(x) for cn in needed_cuts if cn in self.cuts
+        }
 
         def walk(subset: list[int], parent_prob: float, remaining: list[dict]):
             if len(subset) == 1:
