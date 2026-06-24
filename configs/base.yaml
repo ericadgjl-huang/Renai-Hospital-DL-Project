@@ -18,6 +18,8 @@ backbones:
   - resnet50
   - convnext_tiny
   - convnext_small
+  - densenet121
+  - densenet169
 
 normalize:
   mean: [0.5, 0.5, 0.5]

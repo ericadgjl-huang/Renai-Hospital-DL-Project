@@ -101,7 +101,7 @@ python scripts/01_prepare_stage_dataset.py `
 這一步很久，會訓練：
 
 ```text
-10 cuts x 5 folds x 5 backbones = 250 個 fold checkpoints
+10 cuts x 5 folds x 7 backbones = 350 個 fold checkpoints
 ```
 
 ```powershell
@@ -239,7 +239,7 @@ Ficat stage 有 4 類。這個專案不是直接訓練一個 4-class classifier�
 
 對每個 cut，程式會在 train_val 資料上做 5-fold CV。
 
-每個 fold 會訓練 5 個 backbone：
+每個 fold 會訓練 7 個 backbone：
 
 ```text
 efficientnet_b0
@@ -247,12 +247,14 @@ efficientnet_b1
 resnet50
 convnext_tiny
 convnext_small
+densenet121
+densenet169
 ```
 
 所以每個 cut 會得到：
 
 ```text
-5 folds x 5 backbones = 25 個 checkpoints
+5 folds x 7 backbones = 35 個 checkpoints
 ```
 
 但實際**集成只取每個 fold 的 validation 最佳 backbone**，所以 ensemble 階段只會用：
@@ -264,8 +266,8 @@ convnext_small
 例如 `12_vs_34` 訓練後可能是：
 
 ```text
-outputs/cuts/12_vs_34/cv/fold_0/<5 個 backbone>/best_*.pth
-outputs/cuts/12_vs_34/cv/fold_1/<5 個 backbone>/best_*.pth
+outputs/cuts/12_vs_34/cv/fold_0/<7 個 backbone>/best_*.pth
+outputs/cuts/12_vs_34/cv/fold_1/<7 個 backbone>/best_*.pth
 ...
 ```
 

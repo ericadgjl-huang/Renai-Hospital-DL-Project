@@ -17,9 +17,9 @@ stage_cls_dataset/stage_1..4/  +  roi_all.csv      (287 張, 4 類)
   │  [固定切分]  outputs/splits/outer_split.json    (seed 42, 80/20)
   ▼
 train_val (229)  ─────────────────────────────►  test (58)  ※ 全程不參與任何選拔
-  │  [04_train_all_cuts.py]  10 cuts × 5 folds × 5 backbones
+  │  [04_train_all_cuts.py]  10 cuts × 5 folds × 7 backbones
   ▼
-outputs/cuts/<cut>/cv/fold_*/<backbone>/best_*.pth  (每 cut 25 個 checkpoint)
+outputs/cuts/<cut>/cv/fold_*/<backbone>/best_*.pth  (每 cut 35 個 checkpoint)
   │  [05_build_ensemble.py]  每 fold 選最佳 backbone(共 5 個) → voting vs stacking
   ▼
 outputs/cuts/<cut>/ensemble/winner.json
@@ -88,7 +88,7 @@ web_app/app.py   本機 demo 網頁 (上傳 X 光 → Stage + Grad-CAM)
 | 步驟 | Script | 做什麼 |
 | --- | --- | --- |
 | 1 | `01_prepare_stage_dataset.py` | YOLO 裁 ROI、右髖翻左、輸出 `stage_cls_dataset/` 與 `roi_all.csv` |
-| 2 | `04_train_all_cuts.py` | 10 cuts × 5 folds × 5 backbones 訓練（最久） |
+| 2 | `04_train_all_cuts.py` | 10 cuts × 5 folds × 7 backbones 訓練（最久） |
 | 3 | `05_build_ensemble.py` | 每 cut 選最佳 backbone/fold、比較 voting vs stacking |
 | 4 | `06_search_hierarchy.py` | 5 種 topology，**用 OOF 選最佳**，test 只回報 |
 | 5 | `07_update_web.py` | 產生 `web_app/_runtime.json` 給網頁用 |
