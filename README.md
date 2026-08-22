@@ -41,6 +41,41 @@
 
 ---
 
+## 2026-07 提升準確度：序數（ordinal）方法
+
+完整說明見 **`docs/v12_提升準確度方法.md`**（含診斷、論文依據、實測數字）。重點：
+
+- 目前的硬路由 / RandomForest combiner **不管期別順序**，在外部 AVNFH 上 RandomForest
+  甚至比硬階層還差（過擬合 58 張內部 test）。改用**序數方法**後，外部泛化
+  macro-F1 由 0.542 → **0.620**、準確度 0.561 → **0.622**（**免重訓**）。
+- 新增 `src/renai/ordinal.py`（QWK 等序數指標、機率校準、rank-consistent 累積解碼、
+  序數 meta、配對 bootstrap 檢定）與 `scripts/14_ordinal_methods.py`
+  （在內部 test + 外部 AVNFH 上比較，OOF 選、test 只回報）。
+- 新增 `src/renai/corn.py` + `scripts/15_train_corn.py`：端到端 **CORN** 序數模型
+  （共享骨幹 + rank-consistent 頭）。**加類別加權（`--class-weight`）的 3 骨幹集成是全場最佳**：
+  外部 AVNFH QWK **0.700**、準確度 **0.665**，內部外部都在統計上顯著贏過現行階層（p<0.05）。
+
+```powershell
+python scripts/14_ordinal_methods.py --device 0        # 免重訓，當日可跑
+python scripts/15_train_corn.py --backbones efficientnet_b0,convnext_tiny,densenet121 --device 0 --class-weight
+```
+
+> 完整方法/數字/圖表見 `docs/`：`v12_提升準確度方法.md`（診斷＋所有實驗數字）、
+> `論文_方法與結果.md`（可貼進論文）、`實驗總覽_我做過哪些實驗.md`（所有實驗地圖）、
+> `v12_白話總覽_給你讀.md`（白話 CORN 說明）。
+
+### Web app 已改用 CORN stacking（最佳模型）
+
+`web_app/app.py` 現在用最佳的 **9 骨幹 CORN + stacking**（非舊的階層/RandomForest）做 inference：
+上傳 X 光 → YOLO(rebox) 裁 ROI → 9 骨幹 CORN → stacking meta → 期別 + Grad-CAM。
+
+```powershell
+python scripts/24_export_web_corn.py   # 由 local checkpoints 產生 web_app/corn_runtime/
+python web_app/app.py                   # 啟動 (http://127.0.0.1:5000)
+```
+
+---
+
 ## 從 Drive 原始資料到最終輸出
 
 以下指令假設你在專案根目錄執行，也就是有：

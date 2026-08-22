@@ -24,9 +24,22 @@ stage_cls_dataset/
 yolo_dataset_process/
 drive-download-*/
 data/
+# New AVNFH cohort (raw + staging copy + YOLO crops) — patient data, local only
+AVNFH/
+AVNFH_staged/
+stage_cls_avnfh/
+# Merged (old + AVNFH) training set — patient data, local only
+stage_cls_merged/
+# Patient metadata / OCR tables (contain PID, birthdays — personal data) — local only
+20251103開會前/
 
 # --- Training outputs (rebuild from scratch with scripts/) ---
 outputs/
+outputs_merged/
+outputs_merged_rin_lr1e3/
+outputs_merged_patient/
+outputs_merged_patient_s3w/
+outputs_merged_patient_full/
 
 # --- Model weights (use GitHub Releases or external storage) ---
 weights/
@@ -42,3 +55,17 @@ web_app/temp.jpg
 
 # No-CV experiment artifacts (figures/ckpts kept locally for the thesis)
 outputs_nocv/
+outputs_merged_patient_v2/
+
+# Re-box (重新畫框後) experiment — local only
+stage_cls_dataset_rebox/
+stage_cls_merged_rebox/
+outputs_merged_patient_rebox/
+roi_all_rebox.csv
+yolo_rebox/
+stage_cls_avnfh_rebox/
+roi_avnfh_rebox.csv
+weights/yolo_best_rebox.pt
+
+# Web CORN runtime bundle (regenerate with scripts/24_export_web_corn.py) — depends on local ckpts
+web_app/corn_runtime/

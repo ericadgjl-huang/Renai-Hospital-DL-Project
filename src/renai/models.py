@@ -7,8 +7,64 @@ so they are kept in the pool."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import torch
 import torch.nn as nn
 import torchvision.models as tvm
+
+# RadImageNet (Mei et al., Radiology:AI 2022) provides medical-image pretrained
+# weights for ResNet50 and DenseNet121 (+ Inception variants). On small
+# radiology datasets it beats ImageNet transfer by ~0.9-9.4% AUC. Weights are
+# stored with a Sequential "backbone." prefix; these maps translate them onto
+# torchvision's named modules.
+RADIMAGENET_FILES = {"resnet50": "ResNet50.pt", "densenet121": "DenseNet121.pt"}
+_RESNET_IDX_TO_NAME = {0: "conv1", 1: "bn1", 4: "layer1",
+                       5: "layer2", 6: "layer3", 7: "layer4"}
+
+
+def load_radimagenet_weights(model: nn.Module, backbone: str, weights_dir) -> int:
+    """Load RadImageNet medical-pretrained weights into a torchvision backbone,
+    IN PLACE, before its classifier head is swapped. Returns the number of
+    tensors successfully loaded (0 = nothing matched -> stays on ImageNet).
+
+    Only resnet50 / densenet121 are covered (the two RadImageNet models in this
+    project's pool); other backbones are left on their ImageNet weights."""
+    name = backbone.lower()
+    fn = RADIMAGENET_FILES.get(name)
+    if fn is None:
+        print(f"  [radimagenet] {backbone}: no RadImageNet weights available "
+              f"-> keeping ImageNet.", flush=True)
+        return 0
+    path = Path(weights_dir) / fn
+    if not path.exists():
+        print(f"  [radimagenet] {backbone}: {path} not found -> keeping ImageNet.", flush=True)
+        return 0
+
+    raw = torch.load(path, map_location="cpu", weights_only=False)
+    raw = raw.get("state_dict", raw) if isinstance(raw, dict) else raw
+
+    remapped = {}
+    for k, v in raw.items():
+        if not k.startswith("backbone."):
+            continue
+        rest = k[len("backbone."):]
+        if name == "resnet50":
+            head, tail = rest.split(".", 1)
+            nm = _RESNET_IDX_TO_NAME.get(int(head))
+            if nm is None:
+                continue
+            remapped[f"{nm}.{tail}"] = v
+        else:  # densenet121: backbone.0.* -> features.*
+            if rest.startswith("0."):
+                remapped[f"features.{rest[2:]}"] = v
+
+    missing, unexpected = model.load_state_dict(remapped, strict=False)
+    loaded = len(remapped) - len(set(remapped) & set(unexpected))
+    print(f"  [radimagenet] {backbone}: loaded {loaded}/{len(remapped)} tensors "
+          f"(unexpected={len(unexpected)}); classifier head stays random.", flush=True)
+    return loaded
+
 
 DEFAULT_BACKBONES: tuple[str, ...] = (
     "efficientnet_b0",

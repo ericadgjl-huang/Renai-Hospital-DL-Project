@@ -150,31 +150,16 @@
                         <p class="text-5xl font-extrabold text-blue-600 drop-shadow-sm" id="finalStage">-</p>
                     </div>
 
-                    <!-- Images Grid (Grad-CAM x 3) -->
+                    <!-- Grad-CAM (CORN model) -->
                     <div class="bg-gray-50 p-4 rounded-lg border">
                         <p class="text-sm font-medium text-gray-700 mb-3">AI 關注區域 (Grad-CAM 熱力圖):</p>
-                        <div class="grid grid-cols-3 gap-3">
-                            <!-- m1 -->
-                            <div class="flex flex-col items-center">
-                                <p class="text-xs text-gray-600 font-semibold mb-2 text-center">m1 模型<br><span
-                                        class="text-blue-600">(1,2,3),(4)</span></p>
-                                <img id="gradcamM1" src="" alt="Grad-CAM M1"
-                                    class="w-full h-auto object-cover rounded shadow border border-gray-300">
-                            </div>
-                            <!-- m2 -->
-                            <div class="flex flex-col items-center">
-                                <p class="text-xs text-gray-600 font-semibold mb-2 text-center">m2 模型<br><span
-                                        class="text-green-600">(1),(2,3,4)</span></p>
-                                <img id="gradcamM2" src="" alt="Grad-CAM M2"
-                                    class="w-full h-auto object-cover rounded shadow border border-gray-300">
-                            </div>
-                            <!-- m3 -->
-                            <div class="flex flex-col items-center">
-                                <p class="text-xs text-gray-600 font-semibold mb-2 text-center">m3 模型<br><span
-                                        class="text-orange-600">(2),(3)</span></p>
-                                <img id="gradcamM3" src="" alt="Grad-CAM M3"
-                                    class="w-full h-auto object-cover rounded shadow border border-gray-300">
-                            </div>
+                        <div class="flex flex-col items-center">
+                            <p class="text-xs text-gray-600 font-semibold mb-2 text-center">CORN 序數模型<br><span
+                                    class="text-blue-600">模型看哪裡 (DenseNet121)</span></p>
+                            <img id="gradcamM1" src="" alt="Grad-CAM"
+                                class="w-full max-w-sm h-auto object-cover rounded shadow border border-gray-300">
+                            <img id="gradcamM2" class="hidden">
+                            <img id="gradcamM3" class="hidden">
                         </div>
                     </div>
 
@@ -254,9 +239,7 @@
                 document.getElementById('finalStage').textContent = `${data.stage}`;
                 document.getElementById('annotatedResult').src = data.annotated_image;
                 document.getElementById('croppedResult').src = data.cropped_image;
-                document.getElementById('gradcamM1').src = data.gradcam_m1;
-                document.getElementById('gradcamM2').src = data.gradcam_m2;
-                document.getElementById('gradcamM3').src = data.gradcam_m3;
+                if (data.gradcam_m1) document.getElementById('gradcamM1').src = data.gradcam_m1;
 
                 // Format confidences
                 const probsList = document.getElementById('probsList');

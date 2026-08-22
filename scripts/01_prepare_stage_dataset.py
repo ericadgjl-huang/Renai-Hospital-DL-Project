@@ -36,8 +36,8 @@ def _side_from_name(path: Path) -> str:
     return "U"
 
 
-def _output_name(stage: int, raw_path: Path) -> str:
-    return f"S{stage}_{raw_path.name}"
+def _output_name(stage: int, raw_path: Path, prefix: str = "") -> str:
+    return f"S{stage}_{prefix}{raw_path.name}"
 
 
 def main() -> None:
@@ -58,6 +58,16 @@ def main() -> None:
     )
     p.add_argument("--out", type=Path, default=Path("stage_cls_dataset"))
     p.add_argument("--roi-csv", type=Path, default=Path("roi_all.csv"))
+    p.add_argument(
+        "--source-prefix",
+        default="",
+        help=(
+            "Prefix added to each output crop filename so different data "
+            "sources never collide. Example: --source-prefix A_ turns L1.jpg "
+            "into S1_A_L1.jpg. Side (L/R) is still read from the raw filename, "
+            "so right-hip flipping keeps working."
+        ),
+    )
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--imgsz", type=int, default=640)
     p.add_argument("--device", default=None, help="Example: 0, cuda, or cpu.")
@@ -116,7 +126,7 @@ def main() -> None:
                 k = scores.argmax()
 
             x1, y1, x2, y2 = [float(v) for v in boxes[k]]
-            out_name = _output_name(stage, img_path)
+            out_name = _output_name(stage, img_path, args.source_prefix)
             out_path = args.out / f"stage_{stage}" / out_name
 
             with Image.open(img_path).convert("RGB") as im:

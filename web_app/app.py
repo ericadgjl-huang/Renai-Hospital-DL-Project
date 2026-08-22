@@ -1,12 +1,16 @@
-"""Flask app for the hierarchical 4-stage knee classifier.
+"""Flask app — Ficat 4-stage classifier, now served by the CORN + stacking model.
 
-Reads `web_app/_runtime.json` (written by scripts/07_update_web.py) at startup
-and builds a tree of cut predictors that match the topology chosen by the
-hierarchy search. Each cut predictor is a soft-vote of every per-fold best
-checkpoint (5 backbones x 5 folds = up to 25 models per cut).
+Loads `web_app/corn_runtime/manifest.json` + `meta.joblib` (written by
+scripts/24_export_web_corn.py): a 9-backbone class-weighted CORN ensemble whose
+per-backbone cumulative probabilities are combined by a stacking meta-learner
+(the OOF-selected best model, QWK ~0.80). On upload:
 
-If `_runtime.json` is missing the app still boots but every /predict call
-returns a clear "models not configured yet" error.
+    X-ray -> YOLO ROI crop (right hip flipped to left) -> 9 CORN backbones
+    (5 folds each, averaged) -> 9x3 cumulative features -> stacking meta -> stage
+    + a Grad-CAM heatmap (DenseNet121) of where the model looked.
+
+If the runtime is missing the app still boots but /predict returns a clear error.
+Legacy hierarchy runtime (`_runtime.json`) is no longer used.
 """
 
 from __future__ import annotations
@@ -22,7 +26,6 @@ import cv2
 import joblib
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torchvision.transforms as T
 from flask import Flask, jsonify, render_template, request
 from PIL import Image
@@ -32,166 +35,89 @@ WEB_APP_DIR = Path(__file__).resolve().parent
 PROJ_ROOT = WEB_APP_DIR.parent
 sys.path.insert(0, str(PROJ_ROOT / "src"))
 
+from renai.corn import corn_cumulative_probs, create_corn_model  # noqa: E402
 from renai.gradcam import GradCAM  # noqa: E402
-from renai.models import create_model, get_target_layer  # noqa: E402
+from renai.models import get_target_layer  # noqa: E402
+from renai.ordinal import decode_rank_count  # noqa: E402
 
-device = "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 app = Flask(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Runtime config
-# ---------------------------------------------------------------------------
-
-RUNTIME_PATH = WEB_APP_DIR / "_runtime.json"
-
-
-def load_runtime() -> dict | None:
-    if not RUNTIME_PATH.exists():
-        return None
-    return json.loads(RUNTIME_PATH.read_text(encoding="utf-8"))
+CORN_DIR = WEB_APP_DIR / "corn_runtime"
+MANIFEST_PATH = CORN_DIR / "manifest.json"
+META_PATH = CORN_DIR / "meta.joblib"
 
 
 # ---------------------------------------------------------------------------
-# Cut predictor — soft-vote of every per-fold best ckpt for this cut.
+# CORN + stacking model
 # ---------------------------------------------------------------------------
 
-class CutPredictor:
-    def __init__(self, cut_name: str, info: dict):
-        self.cut_name = cut_name
-        self.kind: str = info.get("kind", "fold_voting")
-        self.members: list[dict] = list(info["members"])
+class CornStackingModel:
+    """9-backbone CORN ensemble + stacking meta. Feature order == manifest order
+    (== the order the meta was fitted on), so there is no train/serve skew."""
 
-        self._models: list[tuple[str, torch.nn.Module]] = []
-        for entry in self.members:
+    def __init__(self, manifest: dict, meta):
+        self.manifest = manifest
+        self.meta = meta
+        self.backbones: list[dict] = manifest["backbones"]
+        self.img_size = int(manifest.get("img_size", 384))
+
+        # load every fold checkpoint, grouped by backbone (in manifest order)
+        self.models: list[list[torch.nn.Module]] = []
+        gc_bb = manifest.get("gradcam_backbone", "densenet121")
+        self._gc_model = None
+        self._gc_backbone = gc_bb
+        for entry in self.backbones:
             bb = entry["backbone"]
-            ckpt = Path(entry["ckpt"])
-            m = create_model(bb, num_classes=2).to(device)
-            m.load_state_dict(torch.load(ckpt, map_location=device))
-            m.eval()
-            self._models.append((bb, m))
-
-        self._meta = None
-        meta_path = info.get("meta_path")
-        if self.kind == "stacking" and meta_path:
-            self._meta = joblib.load(meta_path)
-
-        if self._models:
-            bb0, m0 = self._models[0]
-            self._gradcam_backbone = bb0
-            self._gradcam = GradCAM(m0, get_target_layer(m0, bb0))
+            fold_models = []
+            for rel in entry["ckpts"]:
+                m = create_corn_model(bb).to(device)
+                m.load_state_dict(torch.load(PROJ_ROOT / rel, map_location=device))
+                m.eval()
+                fold_models.append(m)
+            self.models.append(fold_models)
+            if bb == gc_bb and self._gc_model is None and fold_models:
+                self._gc_model = fold_models[0]
+        if self._gc_model is not None:
+            self._gradcam = GradCAM(self._gc_model, get_target_layer(self._gc_model, gc_bb))
         else:
-            self._gradcam_backbone = None
             self._gradcam = None
+        n_loaded = sum(len(f) for f in self.models)
+        print(f"[boot] CORN: {len(self.backbones)} backbones / {n_loaded} fold models "
+              f"on {device}; gradcam={gc_bb}", flush=True)
 
     @torch.no_grad()
-    def prob_class1(self, x: torch.Tensor) -> float:
-        x = x.to(device)
-        sums = None
-        for _bb, m in self._models:
-            p = F.softmax(m(x), dim=1).cpu().numpy()
-            sums = p if sums is None else sums + p
-        if sums is None:
-            return 0.0
-        avg_softmax = sums / float(len(self._models))   # (1, 2)
-
-        if self.kind == "stacking" and self._meta is not None:
-            return float(self._meta.predict_proba(avg_softmax)[0, 1])
-        return float(avg_softmax[0, 1])
-
-    def gradcam(self, x: torch.Tensor) -> tuple[str, np.ndarray]:
-        if self._gradcam is None or self._gradcam_backbone is None:
-            raise RuntimeError(f"No Grad-CAM available for cut {self.cut_name}")
-        x = x.clone().requires_grad_(True)
-        cam = self._gradcam(x)
-        return self._gradcam_backbone, cam
-
-
-# ---------------------------------------------------------------------------
-# Hierarchy router
-# ---------------------------------------------------------------------------
-
-class HierarchyRouter:
-    def __init__(self, runtime: dict):
-        self.runtime = runtime
-        self.topology = runtime["topology"]
-        self.cuts: dict[str, CutPredictor] = {
-            cn: CutPredictor(cn, info) for cn, info in runtime["cuts"].items()
-        }
-
-        # Optional learned combiner head (idea #4): replaces hard routing with a
-        # classifier over the cut probabilities. Falls back to routing if absent.
-        self.combiner = None
-        self.combiner_cuts: list[str] = []
-        self.combiner_name = None
-        self.combiner_featureset = None
-        cb = runtime.get("combiner")
-        if cb and Path(cb.get("model_path", "")).exists():
-            bundle = joblib.load(cb["model_path"])
-            self.combiner = bundle["model"]
-            self.combiner_cuts = cb.get("cuts") or bundle.get("cuts", [])
-            self.combiner_name = cb.get("best_model")
-            self.combiner_featureset = cb.get("featureset")
-            print(
-                f"[boot] combiner = {self.combiner_featureset} / {self.combiner_name} "
-                f"cuts={self.combiner_cuts}",
-                flush=True,
-            )
+    def _features(self, x: torch.Tensor) -> np.ndarray:
+        """9x3 cumulative-prob feature vector (avg over each backbone's folds)."""
+        cols = []
+        for fold_models in self.models:
+            probs = torch.stack([corn_cumulative_probs(m(x)) for m in fold_models]).mean(0)
+            cols.append(probs.cpu().numpy())          # (1,3)
+        return np.nan_to_num(np.hstack(cols))          # (1, 27)
 
     def predict(self, x: torch.Tensor) -> dict:
-        rules = list(self.topology["rules"])
-        per_stage_prob: dict[int, float] = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+        x = x.to(device)
+        feat = self._features(x)
+        stage = int(self.meta.predict(feat)[0])        # thesis decode (expected value)
+        proba = self.meta.predict_proba(feat)[0]       # 4-class simplex
+        classes = [int(c) for c in self.meta.classes_]
+        per_stage = {s: 0.0 for s in (1, 2, 3, 4)}
+        for c, p in zip(classes, proba):
+            per_stage[c] = float(p)
+        return {"final_stage": stage, "per_stage": per_stage, "method": self.manifest["model"]}
 
-        cam_data: list[dict] = []
-        for r in rules:
-            backbone, cam = self.cuts[r["cut"]].gradcam(x)
-            cam_data.append({"cut": r["cut"], "backbone": backbone, "cam": cam})
-
-        # Probabilities for the routing cuts AND any extra cuts the combiner needs
-        # (combiner[all] uses up to 10 cuts; 07_update_web loads them all).
-        needed_cuts = {r["cut"] for r in rules} | set(self.combiner_cuts)
-        prob_cache = {
-            cn: self.cuts[cn].prob_class1(x) for cn in needed_cuts if cn in self.cuts
-        }
-
-        def walk(subset: list[int], parent_prob: float, remaining: list[dict]):
-            if len(subset) == 1:
-                per_stage_prob[subset[0]] += parent_prob
-                return
-            for r in remaining:
-                if sorted(r["left"] + r["right"]) == sorted(subset):
-                    p_right = prob_cache[r["cut"]]
-                    rest = [rr for rr in remaining if rr is not r]
-                    walk(r["left"],  parent_prob * (1.0 - p_right), rest)
-                    walk(r["right"], parent_prob * p_right,         rest)
-                    return
-            per_stage_prob[subset[0]] += parent_prob
-
-        use_combiner = self.combiner is not None and all(
-            c in prob_cache for c in self.combiner_cuts
-        )
-        if use_combiner:
-            feat = np.array([[prob_cache[c] for c in self.combiner_cuts]], dtype=float)
-            proba = self.combiner.predict_proba(feat)[0]
-            classes = [int(c) for c in self.combiner.classes_]
-            per_stage_prob = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
-            for i, cls in enumerate(classes):
-                per_stage_prob[cls] = float(proba[i])
-            final_stage = classes[int(np.argmax(proba))]
-            method = f"combiner[{self.combiner_featureset}] {self.combiner_name}"
-        else:
-            walk([1, 2, 3, 4], 1.0, rules)
-            final_stage = max(per_stage_prob.items(), key=lambda kv: kv[1])[0]
-            method = f"hierarchy {self.topology['name']} {self.topology['description']}"
-
-        return {
-            "final_stage": final_stage,
-            "per_stage": per_stage_prob,
-            "cams": cam_data,
-            "prob_cache": prob_cache,
-            "rules": rules,
-            "method": method,
-        }
+    def gradcam(self, x: torch.Tensor):
+        """Grad-CAM on the representative backbone, targeting the cumulative
+        threshold matching the predicted severity."""
+        if self._gradcam is None:
+            return None, None
+        with torch.no_grad():
+            probs = corn_cumulative_probs(self._gc_model(x.to(device)))
+        stage = int(decode_rank_count(probs.cpu().numpy())[0])
+        tgt = min(max(stage - 2, 0), 2)
+        xg = x.to(device).clone().requires_grad_(True)
+        cam = self._gradcam(xg, class_idx=tgt)
+        return self._gc_backbone, cam
 
 
 # ---------------------------------------------------------------------------
@@ -199,38 +125,35 @@ class HierarchyRouter:
 # ---------------------------------------------------------------------------
 
 yolo_model: YOLO | None = None
-router: HierarchyRouter | None = None
+model: CornStackingModel | None = None
 val_tf: T.Compose | None = None
 
 
 def init_models():
-    global yolo_model, router, val_tf
-
-    runtime = load_runtime()
-    if runtime is None:
-        print(
-            f"[boot] Missing {RUNTIME_PATH}. Run scripts/07_update_web.py after "
-            "hierarchy search to populate it. The app will boot, but /predict "
-            "will return an error until that file exists.",
-            flush=True,
-        )
+    global yolo_model, model, val_tf
+    if not MANIFEST_PATH.exists() or not META_PATH.exists():
+        print(f"[boot] Missing {CORN_DIR}. Run scripts/24_export_web_corn.py first. "
+              "The app boots but /predict will error until then.", flush=True)
         return
 
-    yolo_weights = Path(os.environ.get("RENAI_YOLO_WEIGHTS", "")).expanduser() if os.environ.get("RENAI_YOLO_WEIGHTS") else PROJ_ROOT / "weights" / "yolo_best.pt"
-    if not yolo_weights.exists():
-        yolo_weights = PROJ_ROOT / "weights" / "yolov8n.pt"
-    yolo_model = YOLO(str(yolo_weights))
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    meta = joblib.load(META_PATH)
 
-    router = HierarchyRouter(runtime)
+    yolo_w = os.environ.get("RENAI_YOLO_WEIGHTS") or manifest.get("yolo_weights") or "weights/yolo_best_rebox.pt"
+    yolo_path = Path(yolo_w)
+    if not yolo_path.is_absolute():
+        yolo_path = PROJ_ROOT / yolo_path
+    if not yolo_path.exists():
+        yolo_path = PROJ_ROOT / "weights" / "yolo_best.pt"
+    yolo_model = YOLO(str(yolo_path))
 
+    model = CornStackingModel(manifest, meta)
     val_tf = T.Compose([
-        T.Resize((384, 384)),
+        T.Resize((model.img_size, model.img_size)),
         T.ToTensor(),
         T.Normalize([0.5] * 3, [0.5] * 3),
     ])
-
-    print(f"[boot] topology = {router.topology['name']} {router.topology['description']}", flush=True)
-    print(f"[boot] cuts: {sorted(router.cuts.keys())}", flush=True)
+    print(f"[boot] YOLO = {yolo_path.name}; model = {manifest['model']}", flush=True)
 
 
 try:
@@ -271,15 +194,14 @@ def _b64_image(pil_img: Image.Image) -> str:
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if router is None or yolo_model is None or val_tf is None:
-        return jsonify({"error": "Models not initialized. Run scripts/07_update_web.py first."}), 503
+    if model is None or yolo_model is None or val_tf is None:
+        return jsonify({"error": "Models not initialized. Run scripts/24_export_web_corn.py first."}), 503
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
 
     side = request.form.get("side", "L")
     file = request.files["image"]
     img = Image.open(file.stream).convert("RGB")
-
     tmp_path = WEB_APP_DIR / "temp.jpg"
     img.save(tmp_path)
 
@@ -299,28 +221,25 @@ def predict():
         x1, y1, x2, y2 = map(int, boxes[k])
         cropped_img = img.crop((x1, y1, x2, y2))
 
-        annotated = res.plot()[..., ::-1]
-        annotated_b64 = _b64_image(Image.fromarray(annotated))
+        annotated_b64 = _b64_image(Image.fromarray(res.plot()[..., ::-1]))
         cropped_b64 = _b64_image(cropped_img)
 
         inference_img = cropped_img if side != "R" else cropped_img.transpose(Image.FLIP_LEFT_RIGHT)
         x = val_tf(inference_img).unsqueeze(0).to(device)
 
-        result = router.predict(x)
-        cam_overlays = [
-            {
-                "cut": entry["cut"],
-                "backbone": entry["backbone"],
-                "image": "data:image/jpeg;base64," + _overlay_b64(entry["cam"], cropped_img, side),
-            }
-            for entry in result["cams"]
-        ]
+        result = model.predict(x)
+        gc_backbone, cam = model.gradcam(x)
+        cam_overlays = []
+        if cam is not None:
+            cam_overlays.append({
+                "cut": "CORN", "backbone": gc_backbone,
+                "image": "data:image/jpeg;base64," + _overlay_b64(cam, cropped_img, side),
+            })
 
         per_stage = result["per_stage"]
         sorted_probs = sorted(
             ({"label": f"第{i}類", "value": float(per_stage[i])} for i in (1, 2, 3, 4)),
-            key=lambda d: d["value"],
-            reverse=True,
+            key=lambda d: d["value"], reverse=True,
         )
 
         return jsonify({
@@ -329,11 +248,11 @@ def predict():
             "stage": f"Stage {result['final_stage']}",
             "sorted_probs": sorted_probs,
             "method": result.get("method", ""),
-            "topology": router.topology["name"] + " " + router.topology["description"],
+            "topology": result.get("method", ""),
             "cam_overlays": cam_overlays,
-            "gradcam_m1": cam_overlays[0]["image"] if len(cam_overlays) > 0 else None,
-            "gradcam_m2": cam_overlays[1]["image"] if len(cam_overlays) > 1 else None,
-            "gradcam_m3": cam_overlays[2]["image"] if len(cam_overlays) > 2 else None,
+            "gradcam_m1": cam_overlays[0]["image"] if cam_overlays else None,
+            "gradcam_m2": None,
+            "gradcam_m3": None,
         })
     except Exception as e:
         return jsonify({"error": f"預測時發生錯誤: {e}"}), 500
