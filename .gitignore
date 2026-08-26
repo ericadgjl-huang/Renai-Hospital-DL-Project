@@ -69,3 +69,5 @@ weights/yolo_best_rebox.pt
 
 # Web CORN runtime bundle (regenerate with scripts/24_export_web_corn.py) — depends on local ckpts
 web_app/corn_runtime/
+stage_cls_merged_rebox_3cls/
+outputs_corn3_rebox/

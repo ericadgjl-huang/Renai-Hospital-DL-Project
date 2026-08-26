@@ -33,7 +33,8 @@ NUM_THRESH = 3        # K-1 for K=4 stages
 
 def corn_loss(logits: torch.Tensor, stages_1based: torch.Tensor,
               pos_weights: torch.Tensor | None = None,
-              stage_weights: torch.Tensor | None = None) -> torch.Tensor:
+              stage_weights: torch.Tensor | None = None,
+              num_classes: int = 4) -> torch.Tensor:
     """CORN conditional-BCE loss.
 
     logits: (B, 3) — one logit per threshold (stage>=2, >=3, >=4).
@@ -57,7 +58,7 @@ def corn_loss(logits: torch.Tensor, stages_1based: torch.Tensor,
     y = stages_1based.long()
     total = logits.new_zeros(())
     n_terms = 0
-    for t in range(NUM_THRESH):
+    for t in range(num_classes - 1):
         need_stage = t + 2                     # this threshold asks "stage >= need_stage"
         if t == 0:
             mask = torch.ones_like(y, dtype=torch.bool)
@@ -81,13 +82,13 @@ def corn_loss(logits: torch.Tensor, stages_1based: torch.Tensor,
     return total / max(n_terms, 1)
 
 
-def corn_pos_weights(stages_1based, device, cap: float = 8.0) -> torch.Tensor:
+def corn_pos_weights(stages_1based, device, cap: float = 8.0, num_classes: int = 4) -> torch.Tensor:
     """Per-threshold pos_weight = (#neg / #pos) on the conditional subset, from
     the FULL training labels (stable, unlike per-batch). Capped to avoid blow-up
     when a positive class is extremely rare."""
     y = torch.as_tensor(stages_1based).long()
     w = []
-    for t in range(NUM_THRESH):
+    for t in range(num_classes - 1):
         need = t + 2
         sub = y if t == 0 else y[y >= (t + 1)]
         pos = int((sub >= need).sum())
@@ -116,14 +117,15 @@ def corn_predict(logits: torch.Tensor) -> torch.Tensor:
     return 1 + (probs > 0.5).sum(dim=1)
 
 
-def create_corn_model(backbone: str, radimagenet_dir=None):
-    """A backbone whose final linear outputs NUM_THRESH=3 CORN logits.
+def create_corn_model(backbone: str, radimagenet_dir=None, num_classes: int = 4):
+    """A backbone whose final linear outputs (num_classes-1) CORN logits
+    (default 3, i.e. K=4 stages).
 
     If ``radimagenet_dir`` is given, RadImageNet medical-pretrained weights are
     loaded into the backbone first (resnet50 / densenet121 only); the CORN head
     is then attached fresh."""
     from .models import create_model, load_radimagenet_weights
-    model = create_model(backbone, num_classes=NUM_THRESH)
+    model = create_model(backbone, num_classes=num_classes - 1)
     if radimagenet_dir:
         load_radimagenet_weights(model, backbone, radimagenet_dir)
     return model
