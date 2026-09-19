@@ -71,3 +71,7 @@ weights/yolo_best_rebox.pt
 web_app/corn_runtime/
 stage_cls_merged_rebox_3cls/
 outputs_corn3_rebox/
+stage_cls_merged_rebox_clahe/
+stage_cls_merged_rebox_canny/
+outputs_clahe_rebox/
+outputs_canny_rebox/
